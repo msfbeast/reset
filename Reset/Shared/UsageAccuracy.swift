@@ -14,6 +14,14 @@ enum UsageAccuracy {
         return "waiting for live usage"
     }
 
+    /// For a Claude account other than the terminal's: live usage reads only the terminal's sign-in, so this one's
+    /// window comes from its sessions and the desktop app's log. Without this, an agent on that account was told
+    /// to "see estimate_note" and found none.
+    static func otherAccountNote(isEstimate: Bool, usageKnown: Bool) -> String? {
+        guard isEstimate || !usageKnown else { return nil }
+        return (isEstimate ? "estimated" : "usage unknown") + " · live usage only reads the account Claude Code in Terminal is signed in to"
+    }
+
     /// The line to show: "estimated · live usage off" when the window itself is guessed from activity, or
     /// "usage unknown · …" when the reset is exact (from a limit message) but there's no usage reading.
     static func note(isEstimate: Bool, usageKnown: Bool, liveEnabled: Bool, liveWorking: Bool, needsSignIn: Bool) -> String? {

@@ -118,8 +118,12 @@ final class MCPServerTests: XCTestCase {
         return WidgetSnapshot(updated: now, providers: [claude], windows: [], weekCost: 12.345, cacheHit: 0.9)
     }
 
+    /// The calling agent's account, as the desktop app would pass it; nil like a plain terminal Claude Code.
+    private var org: String?
+
     private var env: MCPServer.Environment {
-        MCPServer.Environment(now: { [now] in now }, snapshot: { [weak self] in self?.snapshot }, budgetURL: budgetURL, running: { true })
+        MCPServer.Environment(now: { [now] in now }, snapshot: { [weak self] in self?.snapshot }, budgetURL: budgetURL, running: { true },
+                              org: { [weak self] in self?.org })
     }
 
     /// Sends one NDJSON line and parses the reply line back, as a client would.
@@ -161,6 +165,64 @@ final class MCPServerTests: XCTestCase {
         let (report, isError) = call("get_claude_usage")
         XCTAssertTrue(isError)
         XCTAssertNotNil(report["error"])
+    }
+
+    /// The terminal on Team with its window used up, the desktop app switched to Pro with a fresh one.
+    private func twoAccounts() -> WidgetSnapshot {
+        var team = WidgetSnapshot.Provider(id: "claude", name: "Claude · Team", resetsAt: now.addingTimeInterval(4680), ready: false,
+                                           available: true, used: 100, blockedUntil: nil)
+        team.org = "team-org"
+        var pro = WidgetSnapshot.Provider(id: "claude-pro-org", name: "Claude · Pro", resetsAt: now.addingTimeInterval(17000), ready: false,
+                                          available: true, used: 4, blockedUntil: nil)
+        pro.org = "pro-org"
+        var s = WidgetSnapshot(updated: now, providers: [team], windows: [], weekCost: 1, cacheHit: 0)
+        s.claudeAccounts = [team, pro]
+        s.claudeRunsOutAt = now.addingTimeInterval(600)
+        return s
+    }
+
+    /// An agent in the desktop app on Pro was told "Window nearly exhausted" from the terminal's Team account.
+    func testAnAgentGetsItsOwnAccountsWindow() {
+        snapshot = twoAccounts()
+        org = "pro-org"
+        let (report, _) = call("get_claude_usage")
+        let claude = report["claude"] as? [String: Any]
+        XCTAssertEqual(claude?["account"] as? String, "Claude · Pro")
+        XCTAssertEqual(claude?["percent_left"] as? Int, 96)
+        XCTAssertNil(claude?["projected_run_out_local"], "the run-out forecast is the terminal account's")
+        XCTAssertEqual(report["advice"] as? String, "Plenty of window left.")
+    }
+
+    func testWithoutAnAccountTheTerminalsIsReported() {
+        snapshot = twoAccounts()
+        let (report, _) = call("get_claude_usage")
+        let claude = report["claude"] as? [String: Any]
+        XCTAssertEqual(claude?["account"] as? String, "Claude · Team")
+        XCTAssertEqual(claude?["percent_left"] as? Int, 0)
+    }
+
+    func testAnUnlistedAccountIsUnknownNotAnotherAccounts() {
+        snapshot = twoAccounts()
+        org = "new-org"
+        let (report, _) = call("get_claude_usage")
+        XCTAssertEqual((report["claude"] as? [String: Any])?["window"] as? String, "unknown")
+        XCTAssertNil((report["claude"] as? [String: Any])?["percent_left"])
+        XCTAssertTrue((report["advice"] as? String)?.contains("unknown") == true)
+    }
+
+    func testOneAccountReportsAsBefore() {
+        org = "any-org"
+        let (report, _) = call("get_claude_usage")
+        XCTAssertNil((report["claude"] as? [String: Any])?["account"], "nothing to tell apart")
+        XCTAssertEqual((report["claude"] as? [String: Any])?["percent_left"] as? Int, 70, "a snapshot from before accounts were written")
+    }
+
+    func testABudgetIsJudgedOnTheCallersAccount() {
+        snapshot = twoAccounts()
+        org = "pro-org"
+        let (set, _) = call("set_budget", ["task": "t", "max_window_percent": 50])
+        XCTAssertEqual((set["budget"] as? [String: Any])?["status"] as? String, "normal", "4% of Pro, not 100% of Team")
+        XCTAssertEqual(Budget.load(from: budgetURL)?.org, "pro-org", "so the menu shows it on Pro's card too")
     }
 
     func testUsageWithoutBudget() {

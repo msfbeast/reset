@@ -12,6 +12,9 @@ struct Budget: Codable, Equatable {
     var maxPercent: Int
     var downshiftModel: String?
     var setAt: Date
+    /// The account of the agent that set it (see MCPServer.Environment.org), so it's judged on that account's
+    /// window; nil for budgets set from a plain terminal, or before accounts were told apart: the terminal's.
+    var org: String? = nil
 
     static let fileName = "budget.json"
     static var url: URL { WidgetSnapshot.url.deletingLastPathComponent().appendingPathComponent(fileName) }

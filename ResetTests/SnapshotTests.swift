@@ -85,6 +85,56 @@ final class SnapshotTests: XCTestCase {
         }
     }
 
+    // MARK: A card for each tool
+
+    func testACardForEachTool() throws {
+        // A second Claude account (coral, Claude's mascot, its weekly limit nearly used), tools in their own colours,
+        // and a custom tool, which has no mascot.
+        func status(_ id: String, _ name: String, resetsIn: TimeInterval?, used: Double?,
+                    weekly: WindowStatus.Secondary? = nil) -> WindowStatus {
+            WindowStatus(id: id, name: name, state: resetsIn.map { .active(resetsAt: now.addingTimeInterval($0)) } ?? .ready,
+                         usedPercent: used, isEstimate: false, source: name, secondary: weekly, canAutoStart: false)
+        }
+        let statuses = [
+            status("claude-0281", "Claude · Team", resetsIn: 3 * 3600 + 20 * 60, used: 19,
+                   weekly: .init(label: "Weekly limit", resetsAt: now.addingTimeInterval(3 * 86400), usedPercent: 84)),
+            status("codex", "Codex", resetsIn: 4 * 3600 + 46 * 60, used: 52),
+            status("gemini", "Gemini CLI", resetsIn: nil, used: 0),
+            status("custom-notes", "Notes AI", resetsIn: 40 * 60, used: nil),
+        ]
+        let cards = OtherCards(statuses: statuses, look: .glow, now: now) { s in
+            CardData(id: s.id, name: s.name, color: Theme.color(for: s.id), windowStart: s.resetsAt?.addingTimeInterval(-5 * 3600),
+                     resetsAt: s.resetsAt, ready: s.state == .ready, used: s.usedPercent,
+                     mascot: MascotArt.image(s.id, Mood.of(s, justReset: false)).map { Image(nsImage: $0) })
+        }
+        try check(cards, "menu-cards", width: 352)
+        let drawn = ImageRenderer(content: cards.frame(width: 352))
+        XCTAssertEqual(CGFloat(try XCTUnwrap(drawn.cgImage).height), OtherCards.height(statuses),
+                       "whether the cards scroll is decided from their real height")
+    }
+
+    func testCardsScrollOnlyWhenTheyWouldRunOffTheScreen() {
+        let weekly = WindowStatus.Secondary(label: "Weekly limit", resetsAt: now, usedPercent: 10)
+        func tools(_ n: Int, weekly w: Bool = false) -> [WindowStatus] {
+            (0..<n).map { WindowStatus(id: "custom-\($0)", name: "\($0)", state: .ready, usedPercent: nil, isEstimate: false,
+                                       source: "", secondary: w ? weekly : nil, canAutoStart: false) }
+        }
+        XCTAssertEqual(OtherCards.height(tools(1)), 128)
+        // A 14-inch MacBook Pro leaves about 944 points under the menu bar.
+        let room = OtherCards.room(screen: 944, banners: 0)
+        XCTAssertLessThanOrEqual(OtherCards.height(tools(3)), room, "three cards fit")
+        XCTAssertGreaterThan(OtherCards.height(tools(4, weekly: true)), room, "four with weekly lines scroll")
+        XCTAssertLessThan(OtherCards.room(screen: 944, banners: 2), room, "banners take room")
+        XCTAssertEqual(OtherCards.room(screen: 400, banners: 2), 128, "a small screen still shows a whole card")
+    }
+
+    func testACustomToolsCardUsesItsOwnWindowLength() throws {
+        let tool = CustomProvider(name: "Notes AI", windowHours: 24, startedAt: now.addingTimeInterval(-3600))
+        let d = Store().cardData(for: tool.status(now: now))
+        XCTAssertEqual(d.windowLength, 24 * 3600)
+        XCTAssertEqual(try XCTUnwrap(d.left(at: now)), 23.0 / 24, accuracy: 0.001, "an hour into a day, not a full 5 hours")
+    }
+
     // MARK: Compare or record
 
     private func check(_ view: some View, _ name: String, width: Double? = nil,

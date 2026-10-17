@@ -61,6 +61,11 @@ struct ClaudeSource: WindowSource {
         let labels = Self.accountLabels(ids: ids, defaults: [Self.planLabel(account?.plan) ?? "Claude Code"] + others.map { Self.otherLabel(org: $0) },
                                         custom: Self.customNames)
         if !others.isEmpty { mainStatus.name = "Claude · " + labels[0] }
+        func lastTagged(_ org: String?) -> Date? {
+            guard let org else { return nil }
+            return week.filter { $0.org == org && $0.kind == .activity && $0.time <= now }.map(\.time).max()
+        }
+        mainStatus.lastTaggedActivity = lastTagged(mainStatus.account)
         var out = [mainStatus]
         for (i, org) in others.enumerated() {
             let mine = week.filter { $0.org == org }.sorted { $0.time < $1.time }
@@ -71,9 +76,30 @@ struct ClaudeSource: WindowSource {
             if s.isEstimate, s.source.hasPrefix("Estimated from Claude Code activity") {
                 s.source = "Estimated from this account's Claude Code sessions" + s.source.dropFirst("Estimated from Claude Code activity".count)
             }
+            s.lastTaggedActivity = lastTagged(org)
             out.append(s)
         }
         return out
+    }
+
+    /// The account you're using now, which the menu's top card and the menu bar follow. Usually the terminal's,
+    /// but switching accounts in the Claude desktop app leaves the terminal signed in to the old one.
+    ///
+    /// - A switch, in the desktop app or with `claude auth login`, rewrites ~/.claude.json (`configChangedAt`): once
+    ///   Reset lists that account, it wins, even while the other one is still busy. Until then the switch waits.
+    /// - Otherwise the account with the newest session activity takes over, but only once the current one has been
+    ///   quiet for `quiet`. Both can be busy at once (background worktrees on one, a chat on the other), and the top
+    ///   card swapping every minute would be worse than either.
+    static func activeOrg(current: String?, chosenAt: Date?, configOrg: String?, configChangedAt: Date?,
+                          listed: Set<String>, lastUse: [String: Date], now: Date, quiet: TimeInterval = 10 * 60) -> String? {
+        let current = current.flatMap { listed.contains($0) ? $0 : nil }
+        if let c = configOrg, listed.contains(c), c != current,
+           (configChangedAt ?? .distantPast) > (chosenAt ?? .distantPast) || current == nil { return c }
+        let used = lastUse.filter { listed.contains($0.key) }
+        guard let newest = used.max(by: { $0.value < $1.value }) else { return current }
+        guard let current, let mine = used[current] else { return current ?? newest.key }
+        if newest.key != current, now.timeIntervalSince(mine) >= quiet { return newest.key }
+        return current
     }
 
     /// Other accounts count if they were used in the last week; older ones have no window to show.

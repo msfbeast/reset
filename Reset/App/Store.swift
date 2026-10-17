@@ -50,7 +50,7 @@ final class Store {
 
     /// What a look card needs for one provider, with the mascot in its current mood.
     func cardData(for s: WindowStatus) -> CardData {
-        let window: TimeInterval = s.id == "gemini" ? 86400 : 5 * 3600
+        let window: TimeInterval = s.windowLength ?? (s.id == "gemini" ? 86400 : 5 * 3600)
         return CardData(id: s.id, name: s.name, color: Theme.color(for: s.id), windowStart: s.resetsAt?.addingTimeInterval(-window),
                         resetsAt: s.resetsAt, ready: s.state == .ready, blockedUntil: s.blockedUntil, used: s.usedPercent,
                         mascot: MascotArt.image(s.id, Mood.of(s, justReset: false)).map { Image(nsImage: $0) }, windowLength: window,
@@ -60,6 +60,7 @@ final class Store {
     /// "estimated · live usage off" and the like, or nil when the numbers are solid. Only Claude has a live
     /// source to fall back from; the others are exact from their own logs or plainly labelled as estimates.
     func estimateNote(for s: WindowStatus) -> String? {
+        if s.id.hasPrefix("claude-") { return UsageAccuracy.otherAccountNote(isEstimate: s.isEstimate, usageKnown: s.usedPercent != nil) }
         guard s.id == "claude" else { return nil }
         if case .unavailable = s.state { return nil }
         // Only a reported problem counts as not working; still loading is "waiting", not "unavailable".
@@ -160,8 +161,14 @@ final class Store {
 
     /// Window used % that budgets are judged against: 0 once a fresh window is ready, nil when unknown.
     var budgetUsed: Double? {
-        guard let c = statuses.first(where: { $0.id == "claude" }) else { return nil }
+        guard let c = budgetEntry else { return nil }
         return c.state == .ready ? 0 : c.usedPercent
+    }
+
+    /// The account the budget is judged on: the one whose agent set it, else the terminal's.
+    var budgetEntry: WindowStatus? {
+        budget?.org.flatMap { org in statuses.first { $0.account == org && ($0.id == "claude" || $0.id.hasPrefix("claude-")) } }
+            ?? statuses.first { $0.id == "claude" }
     }
 
     func clearBudget() {
@@ -186,6 +193,33 @@ final class Store {
 
     var visible: [WindowStatus] { statuses.filter { prefs(for: $0.id).enabled } }
 
+    /// The Claude entry for the account you're using now (see ClaudeSource.activeOrg): the menu's top card and the
+    /// menu bar follow it. "claude" stays the terminal's account, which live usage, auto-start and widgets go through.
+    private(set) var activeClaudeId = "claude"
+
+    /// Remembered across launches, so a restart doesn't put a different account on top.
+    private func updateActiveClaude(_ list: [WindowStatus], configOrg: String?, now: Date) {
+        let d = UserDefaults.standard
+        let claudes = list.filter { $0.id == "claude" || $0.id.hasPrefix("claude-") }
+        if let c = configOrg, c != d.string(forKey: "claudeConfigOrg") {
+            // The first sighting isn't a switch, only a later change is.
+            if d.string(forKey: "claudeConfigOrg") != nil { d.set(now, forKey: "claudeConfigChangedAt") }
+            d.set(c, forKey: "claudeConfigOrg")
+        }
+        let current = d.string(forKey: "activeClaudeOrg")
+        let lastUse = Dictionary(claudes.compactMap { s in s.account.flatMap { a in s.lastTaggedActivity.map { (a, $0) } } },
+                                 uniquingKeysWith: max)
+        let next = ClaudeSource.activeOrg(current: current, chosenAt: d.object(forKey: "activeClaudeChosenAt") as? Date,
+                                          configOrg: configOrg, configChangedAt: d.object(forKey: "claudeConfigChangedAt") as? Date,
+                                          listed: Set(claudes.compactMap(\.account)), lastUse: lastUse, now: now)
+        if next != current {
+            d.set(next, forKey: "activeClaudeOrg")
+            d.set(now, forKey: "activeClaudeChosenAt")
+        }
+        let id = claudes.count > 1 ? claudes.first { $0.account != nil && $0.account == next }?.id ?? "claude" : "claude"
+        if id != activeClaudeId { activeClaudeId = id; note("Top card follows \(claudes.first { $0.id == id }?.name ?? id)") }
+    }
+
     /// The window that resets soonest, for the menu bar label.
     /// Providers you asked to be alerted about drive the menu bar; the rest only show in the menu.
     private var barCandidates: [WindowStatus] {
@@ -194,10 +228,10 @@ final class Store {
     }
 
     /// The entry whose countdown the bar shows (see MenuBarGlance.pick).
-    var soonest: WindowStatus? { MenuBarGlance.pick(barCandidates, now: now).soonest }
+    var soonest: WindowStatus? { MenuBarGlance.pick(barCandidates, main: activeClaudeId, now: now).soonest }
 
     /// A tracked provider whose longer (weekly) limit is used up, which the menu bar shows ahead of everything.
-    var blockedForBar: WindowStatus? { MenuBarGlance.pick(barCandidates, now: now).blocked }
+    var blockedForBar: WindowStatus? { MenuBarGlance.pick(barCandidates, main: activeClaudeId, now: now).blocked }
 
     /// When Claude's window runs out at today's pace, if that's still ahead and before its reset (see Forecast.current).
     var runsOut: Date? {
@@ -210,13 +244,13 @@ final class Store {
 
     /// What the menu bar shows right now (see MenuBarGlance).
     var glance: MenuBarGlance? {
-        let p = MenuBarGlance.pick(barCandidates, now: now)
+        let p = MenuBarGlance.pick(barCandidates, main: activeClaudeId, now: now)
         return MenuBarGlance.make(ready: p.ready, soonest: p.soonest, blocked: p.blocked, runsOutAt: runsOut,
                                   signedOut: liveNeedsSignIn, limits: limitsShown, now: now)
     }
 
     /// A tracked provider with a fresh window waiting, shown in the bar ahead of any countdown.
-    var readyForBar: WindowStatus? { MenuBarGlance.pick(barCandidates, now: now).ready }
+    var readyForBar: WindowStatus? { MenuBarGlance.pick(barCandidates, main: activeClaudeId, now: now).ready }
 
     func refresh() {
         lastScan = Date()
@@ -244,10 +278,13 @@ final class Store {
         scanning = true
         let extras = claudeExtraStarts
         let custom = self.custom
+        let signIn = liveClaudeEnabled ? liveClaude.tokenAccount : nil
         scanQueue.async { [weak self] in
             let t = Date()
             // One Claude entry per account (see ClaudeSource.readAll), then the other tools.
-            var list = ClaudeSource(extraStarts: extras).readAll(now: t, account: ClaudeCLI.account(now: t))
+            let cli = ClaudeCLI.resolve(signIn: signIn, status: ClaudeCLI.account(now: t))
+            let configOrg = ClaudeCLI.configOrg()
+            var list = ClaudeSource(extraStarts: extras).readAll(now: t, account: cli)
             list += [
                 CodexSource().read(now: t),
                 GeminiSource().read(now: t),
@@ -270,7 +307,9 @@ final class Store {
                     }
                 }
                 self.statuses = list
+                self.updateActiveClaude(list, configOrg: configOrg, now: t)
                 self.usage.accounts = list.filter { $0.id == "claude" || $0.id.hasPrefix("claude-") }.map { ($0.id, $0.name, $0.account) }
+                if self.usage.signedInOrg != cli?.orgId { self.usage.signedInOrg = cli?.orgId }
                 self.lastRefresh = t
                 self.reloadBudget()
                 self.checkCLISignInIfNeeded()
@@ -674,15 +713,16 @@ final class Store {
         let weekCost = week.reduce(0) { $0 + $1.cost }
         let cr = week.reduce(0) { $0 + $1.cacheRead }, rest = week.reduce(0) { $0 + $1.input + $1.cw5 + $1.cw1h }
         let plan = usage.totalPlanMonthly * 7 / 30
-        let providers = visible.filter { MascotArt.providers.contains($0.id) }.map { s -> WidgetSnapshot.Provider in
+        func provider(_ s: WindowStatus) -> WidgetSnapshot.Provider {
             var available = true
             if case .unavailable = s.state { available = false }
             return .init(id: s.id, name: s.name, resetsAt: s.resetsAt, ready: s.state == .ready, available: available,
                          used: s.usedPercent, blockedUntil: s.blockedUntil, estimate: estimateNote(for: s),
                          weeklyUsed: s.secondary?.usedPercent, weeklyResetsAt: s.secondary?.resetsAt,
                          usageAsOf: usageReadAt(s), liveFailingSince: s.id == "claude" && liveClaudeEnabled ? liveClaude.failingSince : nil,
-                         liveProblem: s.id == "claude" && liveClaudeEnabled ? liveProblemText : nil)
+                         liveProblem: s.id == "claude" && liveClaudeEnabled ? liveProblemText : nil, org: s.account)
         }
+        let providers = visible.filter { MascotArt.providers.contains($0.id) }.map(provider)
         // 7 days: the week widget counts this week's windows from these (5 undercounted it); the barcode draws its own 5 rows.
         let windows = usage.windows(days: 7).map { WidgetSnapshot.Window(start: $0.start, end: $0.end, autoStart: $0.autoStart, hitLimit: $0.hitLimit) }
         var snap = WidgetSnapshot(updated: .distantPast, look: look, providers: providers, windows: windows, weekCost: weekCost,
@@ -691,6 +731,7 @@ final class Store {
         let month = usage.calls.filter { $0.time >= Date().addingTimeInterval(-30 * 86400) }
         let monthCost = month.reduce(0) { $0 + $1.cost }
         snap.monthCost = monthCost
+        snap.claudeAccounts = statuses.filter { $0.id == "claude" || $0.id.hasPrefix("claude-") }.map(provider)
         snap.monthMultiple = usage.totalPlanMonthly > 0 ? monthCost / usage.totalPlanMonthly : nil
         snap.monthCacheSaved = month.reduce(0) { acc, c in
             guard let p = Pricing.claude(c.model) else { return acc }

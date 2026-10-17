@@ -65,12 +65,37 @@ enum ClaudeCLI {
                 timeout.cancel()
                 if let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                    (obj["loggedIn"] as? Bool) == true, let org = obj["orgId"] as? String, !org.isEmpty {
-                    found = Account(orgId: org, plan: obj["subscriptionType"] as? String)
+                    let config = (try? Data(contentsOf: FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude.json")))
+                        .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+                    found = Account(orgId: org, plan: configPlan(org: org, config: config) ?? obj["subscriptionType"] as? String)
                 }
             }
         }
         accountLock.lock(); cachedAccount = (now, found); accountLock.unlock()
         return found
+    }
+
+    /// The terminal's account: whose the Keychain sign-in is, when live usage has asked Anthropic (see
+    /// LiveClaude.TokenAccount), else what `claude auth status` said. The status's orgId follows ~/.claude.json,
+    /// which the desktop app rewrites when you switch accounts there, so it's only the fallback.
+    static func resolve(signIn: LiveClaude.TokenAccount?, status: Account?) -> Account? {
+        signIn.map { Account(orgId: $0.org, plan: $0.plan) } ?? status
+    }
+
+    /// The plan for `org` from ~/.claude.json, where `claude auth status` gets its orgId. Its own plan comes from
+    /// the Keychain, which after switching accounts in the desktop app is still the other account's.
+    static func configPlan(org: String, config: [String: Any]?) -> String? {
+        guard let a = config?["oauthAccount"] as? [String: Any], a["organizationUuid"] as? String == org,
+              let type = a["organizationType"] as? String else { return nil }
+        return type.hasPrefix("claude_") ? String(type.dropFirst("claude_".count)) : type
+    }
+
+    /// The account in ~/.claude.json, which both the desktop app and `claude auth login` rewrite on a switch.
+    static func configOrg() -> String? {
+        let url = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude.json")
+        guard let d = try? Data(contentsOf: url), let obj = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
+              let a = obj["oauthAccount"] as? [String: Any], let org = a["organizationUuid"] as? String, !org.isEmpty else { return nil }
+        return org
     }
 
     static func forgetAccount() {

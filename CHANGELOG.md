@@ -2,6 +2,16 @@
 
 The latest release is on the [Releases page](https://github.com/msfbeast/reset/releases/latest). Older builds are kept but not listed; this file is the history.
 
+## 0.3.19 — work and personal accounts, done properly
+
+- Switch accounts in the Claude desktop app and Reset follows: the menu's top card, the menu bar and the Claude mascot move to the account you're using. Live usage, auto-start and the widgets stay with the account Claude Code in Terminal is signed in to, and the menu says so.
+- Live numbers only go on the account they're for. After switching in the desktop app, Team's used-up window showed on Pro's card, labelled Team.
+- The MCP server answers for the account the asking agent runs on, and says which. Budgets are judged on the account of the agent that set them.
+- The dashboard's sessions say which account they ran under, and the resume command warns when Claude Code in Terminal is signed in to the other one.
+- The menu bar can show the weekly limit: 5-hour, weekly, or both (thanks @DhananjayBhosale).
+- The other tools and accounts can each get a card in the menu, in your chosen look (Settings → Appearance; thanks @DhananjayBhosale).
+- Less background CPU and memory, and a faster launch: transcripts aren't re-read every minute, and the cache is saved when Reset quits.
+
 ## 0.3.18 — agents know how old the numbers are
 
 - The MCP server's get_claude_usage says when usage was last read (usage_as_of, usage_age_minutes) and, if the live check is failing, since when and why (usage_may_be_stale). The advice and any budget then warn that the reading may be out of date.

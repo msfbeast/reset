@@ -21,6 +21,7 @@ struct SettingsView: View {
     /// Remembered between openings; `-settingsTab advanced` on the command line opens a given tab (for renders).
     @AppStorage("settingsTab") private var tab = "general"
     @AppStorage("menuBarStyle") private var menuBarStyle = "pill"
+    @AppStorage("menuOthers") private var menuOthers = "rows"
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
@@ -316,6 +317,10 @@ struct SettingsView: View {
                     }
                 }
                 .padding(.vertical, 4)
+                Picker("Other tools in the menu", selection: $menuOthers) {
+                    Text("Rows").tag("rows")
+                    Text("Cards").tag("cards")
+                }
             } header: {
                 Text("Look")
             } footer: {

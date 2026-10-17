@@ -5,9 +5,14 @@ struct MenuView: View {
     @Bindable var store: Store
     @Environment(\.openWindow) private var openWindow
     @State private var showingNotes = false
+    /// How the other tools and accounts are drawn: compact rows, or a card each (Settings → Appearance).
+    @AppStorage("menuOthers") private var othersAs = "rows"
+    /// The visible height of the display the panel is on, once the panel has said (see PanelScreen).
+    @State private var panelScreen: CGFloat?
 
     private var claude: WindowStatus? { store.visible.first { $0.id == "claude" } }
-    private var hero: WindowStatus? { claude ?? store.visible.first }
+    /// The account you're using now (see Store.activeClaudeId), else the terminal's, else the first tool.
+    private var hero: WindowStatus? { store.visible.first { $0.id == store.activeClaudeId } ?? claude ?? store.visible.first }
     private var others: [WindowStatus] { store.visible.filter { $0.id != hero?.id } }
 
     var body: some View {
@@ -29,10 +34,18 @@ struct MenuView: View {
                     Text("No tools switched on yet. Open Settings to pick yours.")
                         .font(.system(size: 12)).foregroundStyle(Theme.dim).padding(.vertical, 20)
                 }
-                if hero?.id == "claude" { stats; todayStrip }
+                if let id = hero?.id, id == "claude" || id.hasPrefix("claude-") { stats; todayStrip }
                 if !others.isEmpty {
-                    VStack(spacing: 0) { ForEach(others) { MiniProviderRow(store: store, status: $0) } }
-                        .background(RoundedRectangle(cornerRadius: 14).fill(Color.white.opacity(0.04)))
+                    if othersAs == "cards" {
+                        let banners = (store.liveNeedsSignIn || store.autoStartNeedsSignIn ? 1 : 0) + (store.updater.available == nil ? 0 : 1)
+                        OtherCards(statuses: others, look: store.look, now: store.now,
+                                   room: OtherCards.room(screen: panelScreen ?? OtherCards.screenHeight(), banners: banners),
+                                   card: store.cardData)
+                            .background(PanelScreen(height: $panelScreen))
+                    } else {
+                        VStack(spacing: 0) { ForEach(others) { MiniProviderRow(store: store, status: $0) } }
+                            .background(RoundedRectangle(cornerRadius: 14).fill(Color.white.opacity(0.04)))
+                    }
                 }
             }
             .padding(.horizontal, 14).padding(.top, 12).padding(.bottom, 10)
@@ -135,19 +148,21 @@ struct MenuView: View {
     }
 
     @ViewBuilder private func notices(for h: WindowStatus) -> some View {
-        if h.id == "claude", let out = store.runsOut {
-            Label("At this pace you run out around \(Fmt.clock.string(from: out))", systemImage: "flame")
+        // The run-out forecast is the terminal account's (it follows live usage); under another account's card it
+        // says whose, rather than vanishing from the menu.
+        if h.id == "claude" || claude != nil, let out = store.runsOut {
+            Label((h.id == "claude" ? "" : "\(claude?.name ?? "Claude"): ") + "At this pace you run out around \(Fmt.clock.string(from: out))",
+                  systemImage: "flame")
                 .font(.system(size: 11, weight: .medium)).foregroundStyle(Color(hex: 0xFF8A5C))
                 .help((store.forecast.basis.map { $0 + ". " } ?? "") + "Slow down and the warning clears.")
         }
-        if h.id == "claude", let b = store.budget { budgetNotice(b) }
-        if let sec = h.secondary {
-            // Amber from 80%: when the weekly limit runs out, a fresh 5-hour window won't help.
-            Label("\(sec.label) resets \(Fmt.when(sec.resetsAt, now: store.now))\(sec.usedPercent.map { " · \(Int($0.rounded()))% used" } ?? "")",
-                  systemImage: "calendar")
-                .font(.system(size: 11, weight: sec.isHigh ? .medium : .regular))
-                .foregroundStyle(sec.isHigh ? Color(hex: 0xFFB13D) : Theme.dim)
+        if let b = store.budget, store.budgetEntry?.id == h.id { budgetNotice(b) }
+        if h.id.hasPrefix("claude-"), let c = claude {
+            Label("Live usage and auto-start follow \(c.name), the account Claude Code in Terminal is signed in to",
+                  systemImage: "terminal")
+                .font(.system(size: 11)).foregroundStyle(Theme.dim).lineLimit(2)
         }
+        if let sec = h.secondary { LimitLine(limit: sec, now: store.now) }
     }
 
     /// The pacing budget an agent set through reset-mcp. Coloured once it needs attention; clearing it lives on the dashboard.
@@ -260,6 +275,91 @@ struct MenuView: View {
     private func open(_ id: String) {
         NSApp.activate(ignoringOtherApps: true)
         openWindow(id: id)
+    }
+}
+
+/// The other tools and accounts drawn like the top card, in the same look with their own colour, mascot and weekly
+/// line (Settings → Appearance → Other tools in the menu → Cards). Past `room` they scroll, so the menu stays on screen.
+struct OtherCards: View {
+    let statuses: [WindowStatus]
+    let look: Look
+    let now: Date
+    var room: CGFloat = .infinity
+    let card: (WindowStatus) -> CardData
+
+    var body: some View {
+        let cards = VStack(alignment: .leading, spacing: 12) {
+            ForEach(statuses) { s in
+                LookCard(look: look, d: card(s), now: now)
+                    .frame(height: 128)
+                    .help(s.source)
+                if let sec = s.secondary { LimitLine(limit: sec, now: now) }
+            }
+        }
+        if Self.height(statuses) <= room {
+            cards
+        } else {
+            ScrollView { cards }.frame(height: room)
+        }
+    }
+
+    /// 128 a card, plus a line for each weekly limit, 12 apart.
+    static func height(_ statuses: [WindowStatus]) -> CGFloat {
+        statuses.reduce(-12) { $0 + 140 + ($1.secondary == nil ? 0 : 26) }
+    }
+
+    /// Until the panel reports its own display: the menu opens on the display whose menu bar was clicked, which is
+    /// where the pointer is. NSScreen.main is the one with keyboard focus, which on a second display can be much taller.
+    static func screenHeight() -> CGFloat {
+        let screen = NSScreen.screens.first { NSMouseInRect(NSEvent.mouseLocation, $0.frame, false) } ?? NSScreen.main
+        return screen?.visibleFrame.height ?? 900
+    }
+
+    /// The screen less the rest of the menu (header, the top card and its notes, today's numbers, the toolbar) and any
+    /// banners, and never less than one card.
+    static func room(screen: CGFloat, banners: Int) -> CGFloat {
+        max(128, screen - 480 - CGFloat(banners) * 60)
+    }
+}
+
+/// Reports the visible height of the display the menu's panel is on. It's read when the panel is shown or moves to
+/// another display, so the cards don't switch between scrolling and not while the pointer wanders to another one.
+struct PanelScreen: NSViewRepresentable {
+    @Binding var height: CGFloat?
+
+    func makeNSView(context: Context) -> Probe { Probe { h in DispatchQueue.main.async { if height != h { height = h } } } }
+    func updateNSView(_ view: Probe, context: Context) {}
+
+    final class Probe: NSView {
+        let report: (CGFloat) -> Void
+        init(report: @escaping (CGFloat) -> Void) { self.report = report; super.init(frame: .zero) }
+        required init?(coder: NSCoder) { nil }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            NotificationCenter.default.removeObserver(self)
+            guard let window else { return }
+            for name in [NSWindow.didChangeOcclusionStateNotification, NSWindow.didChangeScreenNotification] {
+                NotificationCenter.default.addObserver(self, selector: #selector(read), name: name, object: window)
+            }
+            read()
+        }
+
+        @objc private func read() { if let h = window?.screen?.visibleFrame.height { report(h) } }
+    }
+}
+
+/// A longer limit under its card: when it resets and how much is used. Amber from 80%: when the weekly limit runs
+/// out, a fresh 5-hour window won't help.
+struct LimitLine: View {
+    let limit: WindowStatus.Secondary
+    let now: Date
+
+    var body: some View {
+        Label("\(limit.label) resets \(Fmt.when(limit.resetsAt, now: now))\(limit.usedPercent.map { " · \(Int($0.rounded()))% used" } ?? "")",
+              systemImage: "calendar")
+            .font(.system(size: 11, weight: limit.isHigh ? .medium : .regular))
+            .foregroundStyle(limit.isHigh ? Color(hex: 0xFFB13D) : Theme.dim)
     }
 }
 

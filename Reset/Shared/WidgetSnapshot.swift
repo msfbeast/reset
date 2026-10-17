@@ -22,6 +22,8 @@ struct WidgetSnapshot: Codable {
         /// The live check has been failing since then, and why; the % above is the last good one.
         var liveFailingSince: Date? = nil
         var liveProblem: String? = nil
+        /// For Claude entries, the organization (account) they're for. Optional for old snapshots.
+        var org: String? = nil
     }
     struct Window: Codable {
         var start: Date
@@ -62,6 +64,9 @@ struct WidgetSnapshot: Codable {
     var claudeRunsOutAt: Date?
     /// When a widget's "Start now" was pressed and the app began starting Claude's window; cleared when done.
     var startingAt: Date?
+    /// Every Claude account, the main one first, whether or not it's shown in the menu: reset-mcp answers for the
+    /// account the asking agent runs on (see `claude(org:)`), which can be another one than the terminal's.
+    var claudeAccounts: [Provider]?
 
     struct Project: Codable { var name: String; var cost: Double }
 
@@ -88,6 +93,18 @@ struct WidgetSnapshot: Codable {
     }
 
     var claude: Provider? { providers.first { $0.id == "claude" } }
+
+    /// The Claude entry for an account. No org (an agent that didn't say) means the main one, the terminal's.
+    /// An org Reset hasn't listed gets nil rather than another account's numbers, except with a snapshot from
+    /// before accounts were written, where the main entry is all there is.
+    func claude(org: String?) -> Provider? {
+        guard let org else { return claude }
+        guard let accounts = claudeAccounts else { return claude }
+        return accounts.first { $0.org == org }
+    }
+
+    /// Whether more than one Claude account is in use, so a report should say which one it's about.
+    var hasClaudeAccounts: Bool { (claudeAccounts?.count ?? 0) > 1 }
 
     /// Whether Reset is running, as of `now`, from its heartbeat (see Heartbeat).
     static func appRunning(now: Date = Date(), heartbeat: URL = Heartbeat.url) -> Bool {

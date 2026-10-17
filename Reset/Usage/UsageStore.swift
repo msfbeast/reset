@@ -24,6 +24,8 @@ struct SessionSummary: Identifiable {
     var sessionTitle: String?
     var title: String { sessionTitle ?? projectName }
     var project: String
+    /// The Claude organization (account) the session ran under, when its transcript says.
+    var org: String?
     var projectName: String { ProjectNames.shared.name(for: project) }
     var start: Date
     var end: Date
@@ -206,6 +208,30 @@ final class UsageStore {
         didSet { if !oldValue.elementsEqual(accounts, by: { $0 == $1 }) { inputs += 1 } }
     }
 
+    /// The account the Claude Code CLI is signed in to, when `claude auth status` said; nil when it couldn't be asked.
+    var signedInOrg: String?
+
+    /// Which account a session ran under, by name, for anyone with more than one. `otherThanCLI` is whether that's
+    /// not the account Claude Code is signed in to: its resume command would then carry on under the wrong account,
+    /// so the menu says so. Nil when there's nothing worth saying: one account, or a transcript that doesn't name its
+    /// org (a guessed label would be worse than none). `otherThanCLI` is nil when the CLI's account isn't known,
+    /// since the main entry is then only the most recently used account, not a sign-in.
+    static func sessionAccount(org: String?, accounts: [(id: String, name: String, org: String?)],
+                               signedIn: String?) -> (name: String, otherThanCLI: Bool?, cliName: String?)? {
+        guard accounts.count > 1, let org, let entry = accounts.first(where: { $0.org == org }) else { return nil }
+        let cliName = signedIn.flatMap { s in accounts.first { $0.org == s } }.map { shortName($0.name) }
+        return (shortName(entry.name), signedIn.map { $0 != org }, cliName)
+    }
+
+    /// "Claude · Work" → "Work".
+    static func shortName(_ name: String) -> String {
+        name.hasPrefix("Claude · ") ? String(name.dropFirst("Claude · ".count)) : name
+    }
+
+    func sessionAccount(_ s: SessionSummary) -> (name: String, otherThanCLI: Bool?, cliName: String?)? {
+        Self.sessionAccount(org: s.org, accounts: accounts, signedIn: signedInOrg)
+    }
+
     /// The chosen account's status id, or nil for all of them.
     var account: String? = UserDefaults.standard.string(forKey: "usageAccount") {
         didSet { UserDefaults.standard.set(account, forKey: "usageAccount"); inputs += 1 }
@@ -321,6 +347,7 @@ final class UsageStore {
         for c in inRange {
             var s = map[c.session] ?? SessionSummary(id: c.session, sessionTitle: titles[c.session],
                                                        project: c.project, start: c.time, end: c.time, cost: 0)
+            if s.org == nil { s.org = c.org }
             s.start = min(s.start, c.time); s.end = max(s.end, c.time)
             s.cost += c.cost
             s.input += c.input; s.cacheWrite += c.cw5 + c.cw1h; s.cacheRead += c.cacheRead; s.output += c.output

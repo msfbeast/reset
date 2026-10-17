@@ -129,6 +129,6 @@ struct CustomProvider: Codable, Identifiable, Equatable {
         }
         let hours = windowHours == windowHours.rounded() ? "\(Int(windowHours))h" : "\(windowHours)h"
         return WindowStatus(id: "custom-" + id, name: name, state: state, usedPercent: nil, isEstimate: true,
-                            source: "Manual, \(hours) window", secondary: nil, canAutoStart: false)
+                            source: "Manual, \(hours) window", secondary: nil, canAutoStart: false, windowLength: windowHours * 3600)
     }
 }

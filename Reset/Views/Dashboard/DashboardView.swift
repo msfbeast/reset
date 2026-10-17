@@ -469,7 +469,8 @@ struct DashboardView: View {
                         HStack {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(s.title).font(.system(size: 13)).foregroundStyle(selected ? .white : Color.white.opacity(0.8)).lineLimit(1)
-                                Text("\(Fmt.when(s.end, now: store.now)) · \(s.projectName)").font(.system(size: 11)).foregroundStyle(Dash.faint).lineLimit(1)
+                                Text("\(Fmt.when(s.end, now: store.now)) · \(s.projectName)\(usage.sessionAccount(s).map { " · " + $0.name } ?? "")")
+                                    .font(.system(size: 11)).foregroundStyle(Dash.faint).lineLimit(1)
                             }
                             Spacer()
                             Text(Dash.money(s.cost)).font(Dash.num(14)).foregroundStyle(selected ? Dash.claude : .white)
@@ -481,7 +482,14 @@ struct DashboardView: View {
                     .buttonStyle(.plain)
                     .help(s.title)
                     .contextMenu {
-                        Button("Copy command to resume it") { copyToClipboard(Self.resumeCommand(project: s.project, session: s.id)) }
+                        // Resuming carries on under whichever account the terminal's Claude Code is signed in to,
+                        // so say when that isn't the one the session ran under.
+                        if let a = usage.sessionAccount(s), a.otherThanCLI == true {
+                            Text("Ran on \(a.name); Claude Code in Terminal is signed in to \(a.cliName ?? "another account")")
+                        }
+                        Button(usage.sessionAccount(s).map { "Copy command to resume it (\($0.name))" } ?? "Copy command to resume it") {
+                            copyToClipboard(Self.resumeCommand(project: s.project, session: s.id))
+                        }
                         folderActions(s.project)
                     }
                 }

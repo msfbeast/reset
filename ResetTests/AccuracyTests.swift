@@ -58,4 +58,12 @@ final class AccuracyTests: XCTestCase {
         let p = try JSONDecoder().decode(WidgetSnapshot.Provider.self, from: Data(json.utf8))
         XCTAssertNil(p.estimate)
     }
+
+    /// Another account's window is always from its sessions; an agent on it should be told why, not pointed at nothing.
+    func testAnotherAccountSaysWhyItsUsageIsAGuess() {
+        XCTAssertEqual(UsageAccuracy.otherAccountNote(isEstimate: false, usageKnown: false),
+                       "usage unknown · live usage only reads the account Claude Code in Terminal is signed in to")
+        XCTAssertTrue(UsageAccuracy.otherAccountNote(isEstimate: true, usageKnown: true)?.hasPrefix("estimated") == true)
+        XCTAssertNil(UsageAccuracy.otherAccountNote(isEstimate: false, usageKnown: true), "an exact reset with a reading is solid")
+    }
 }

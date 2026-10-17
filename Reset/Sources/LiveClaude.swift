@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 /// Opt-in exact Claude usage: reads Claude Code's own sign-in from the Keychain and asks Anthropic's usage
@@ -5,7 +6,15 @@ import Foundation
 /// ever sent to api.anthropic.com, and Reset never refreshes or rewrites it (that would sign Claude Code out).
 final class LiveClaude {
     struct Window: Codable, Equatable { var percent: Double; var resetsAt: Date? }
-    struct Snapshot: Codable, Equatable { var fiveHour: Window?; var sevenDay: Window?; var fetchedAt: Date }
+    /// `org` is the account the reading is for (see `TokenAccount`); nil in readings saved before it was asked.
+    struct Snapshot: Codable, Equatable { var fiveHour: Window?; var sevenDay: Window?; var fetchedAt: Date; var org: String? = nil }
+
+    /// Which account the Keychain sign-in belongs to, asked of Anthropic once per sign-in. That's the account the
+    /// terminal's Claude Code runs on, and so the live numbers, auto-start and budgets. `claude auth status` can't
+    /// say: its orgId comes from ~/.claude.json, which the Claude desktop app rewrites when you switch accounts
+    /// there, while its plan comes from the Keychain, so after a switch it named one account with the other's plan.
+    /// Only a hash of the token is kept, to know when the sign-in changed.
+    struct TokenAccount: Codable, Equatable { var tokenHash: String; var org: String; var plan: String? }
 
     /// When Reset last asked, until when Anthropic told it to wait, and the last good reading. Saved to
     /// live-schedule.json and re-read before every fetch, so a restart (or a second copy of the app) respects a
@@ -17,6 +26,8 @@ final class LiveClaude {
         /// Every "slow down" (HTTP 429) received, newest last, to learn where Anthropic's undocumented limit sits.
         /// Optional so schedules saved before it existed still load.
         var limits: [LimitHit]? = nil
+        /// Optional so schedules saved before it existed still load.
+        var account: TokenAccount? = nil
     }
 
     /// One "slow down": when, and how long Anthropic asked Reset to wait (its Retry-After header), if it said.
@@ -62,6 +73,8 @@ final class LiveClaude {
     }
 
     private(set) var snapshot: Snapshot?
+    /// The account the sign-in belongs to, once known; kept on disk so the first scan after a launch has it.
+    private(set) var tokenAccount: TokenAccount?
     private(set) var state: State = .off
     /// True when the failure is about Claude Code's sign-in, which the user has to fix (not a network blip).
     private(set) var needsSignIn = false
@@ -77,6 +90,7 @@ final class LiveClaude {
     init(scheduleURL: URL? = nil, now: Date = Date()) {
         self.scheduleURL = scheduleURL
         guard let saved = Self.loadSchedule(scheduleURL) else { return }
+        tokenAccount = saved.account
         lastAttempt = saved.lastAttempt
         backoffUntil = saved.backoffUntil
         if let good = saved.lastGood, now.timeIntervalSince(good.fetchedAt) < Self.freshFor {
@@ -136,53 +150,106 @@ final class LiveClaude {
                 self.finish(.problem("Claude Code's sign-in has expired. Open Claude Code once and it renews itself"), done)
                 return
             }
-            var req = URLRequest(url: URL(string: "https://api.anthropic.com/api/oauth/usage")!, timeoutInterval: 20)
-            req.setValue("Bearer \(token.access)", forHTTPHeaderField: "Authorization")
-            req.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
-            req.setValue("application/json", forHTTPHeaderField: "Accept")
-            req.setValue("claude-cli/2.1 (external, cli)", forHTTPHeaderField: "User-Agent")
-            URLSession.shared.dataTask(with: req) { data, resp, err in
-                let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
-                if let err { self.finish(.problem("Couldn't reach Anthropic: \(err.localizedDescription)"), done); return }
-                if code == 429 {
-                    let header = (resp as? HTTPURLResponse)?.value(forHTTPHeaderField: "Retry-After").flatMap(Double.init)
-                    let retry = header ?? 600
-                    let until = Date().addingTimeInterval(max(retry, 300))
-                    self.lock.lock(); self.backoffUntil = until; self.lock.unlock()
-                    self.persist {
-                        $0.backoffUntil = until
-                        $0.limits = Array((($0.limits ?? []) + [LimitHit(at: Date(), retryAfter: header)]).suffix(Self.keptLimitHits))
+            let hash = Self.hash(token.access)
+            let known = Self.loadSchedule(self.scheduleURL)?.account ?? self.tokenAccount
+            if let known, known.tokenHash == hash {
+                self.fetchUsage(token, org: known.org, done)
+            } else {
+                // A new sign-in (Claude Code renews it every few hours, or you signed in to another account):
+                // ask whose it is first. If that fails, the reading goes untagged, as before.
+                Self.fetchAccount(token) { org, plan in
+                    if let org {
+                        let a = TokenAccount(tokenHash: hash, org: org, plan: plan)
+                        self.persist { $0.account = a }
+                        DispatchQueue.main.async { self.tokenAccount = a }
                     }
-                    self.finish(.problem("Anthropic asked Reset to slow down; trying again in a few minutes"), done)
-                    return
+                    self.fetchUsage(token, org: org, done)
                 }
-                if code == 401 || code == 403 {
-                    self.finish(.problem("Anthropic didn't accept the sign-in (HTTP \(code))"), done)
-                    return
-                }
-                guard code == 200, let data, let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                    self.finish(.problem("Unexpected reply from Anthropic (HTTP \(code))"), done)
-                    return
-                }
-                let snap = Snapshot(fiveHour: Self.window(obj["five_hour"]), sevenDay: Self.window(obj["seven_day"]), fetchedAt: Date())
-                self.persist { $0.lastGood = snap }
-                // Diagnostics: the usage windows exactly as received (percentages and reset times only).
-                var diag: [String: Any] = ["fetched": ISO8601DateFormatter().string(from: Date())]
-                for k in ["five_hour", "seven_day", "seven_day_opus", "seven_day_sonnet"] { diag[k] = obj[k] ?? NSNull() }
-                if let d = try? JSONSerialization.data(withJSONObject: diag, options: [.prettyPrinted, .sortedKeys]) {
-                    try? d.write(to: WidgetSnapshot.url.deletingLastPathComponent().appendingPathComponent("live-usage.json"))
-                }
-                DispatchQueue.main.async {
-                    self.needsSignIn = false
-                    self.failingSince = nil
-                    self.snapshot = snap
-                    self.state = snap.fiveHour == nil && snap.sevenDay == nil
-                        ? .problem("Signed in, but Anthropic reports no usage windows for this account")
-                        : .ok(snap.fetchedAt)
-                    done()
-                }
-            }.resume()
+            }
         }
+    }
+
+    /// Asks Anthropic's profile endpoint (same host, same sign-in, needs the user:profile scope the usage
+    /// endpoint also needs) which organization the token is for, and its plan.
+    private static func fetchAccount(_ token: Token, _ done: @escaping (String?, String?) -> Void) {
+        var req = URLRequest(url: URL(string: "https://api.anthropic.com/api/oauth/profile")!, timeoutInterval: 20)
+        req.setValue("Bearer \(token.access)", forHTTPHeaderField: "Authorization")
+        req.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
+        req.setValue("application/json", forHTTPHeaderField: "Accept")
+        req.setValue("claude-cli/2.1 (external, cli)", forHTTPHeaderField: "User-Agent")
+        URLSession.shared.dataTask(with: req) { data, resp, _ in
+            guard (resp as? HTTPURLResponse)?.statusCode == 200, let data,
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { done(nil, nil); return }
+            let a = profileAccount(obj)
+            done(a?.org, a?.plan)
+        }.resume()
+    }
+
+    /// The organization and plan in a profile reply: "claude_team" → "team", like `claude auth status` spells plans.
+    static func profileAccount(_ obj: [String: Any]) -> (org: String, plan: String?)? {
+        guard let o = obj["organization"] as? [String: Any], let id = o["uuid"] as? String, !id.isEmpty else { return nil }
+        let type = o["organization_type"] as? String
+        return (id, type.map { $0.hasPrefix("claude_") ? String($0.dropFirst("claude_".count)) : $0 })
+    }
+
+    static func hash(_ token: String) -> String {
+        SHA256.hash(data: Data(token.utf8)).prefix(8).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private func fetchUsage(_ token: Token, org: String?, _ done: @escaping () -> Void) {
+        var req = URLRequest(url: URL(string: "https://api.anthropic.com/api/oauth/usage")!, timeoutInterval: 20)
+        req.setValue("Bearer \(token.access)", forHTTPHeaderField: "Authorization")
+        req.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
+        req.setValue("application/json", forHTTPHeaderField: "Accept")
+        req.setValue("claude-cli/2.1 (external, cli)", forHTTPHeaderField: "User-Agent")
+        URLSession.shared.dataTask(with: req) { data, resp, err in
+            let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            if let err { self.finish(.problem("Couldn't reach Anthropic: \(err.localizedDescription)"), done); return }
+            if code == 429 {
+                let header = (resp as? HTTPURLResponse)?.value(forHTTPHeaderField: "Retry-After").flatMap(Double.init)
+                let retry = header ?? 600
+                let until = Date().addingTimeInterval(max(retry, 300))
+                self.lock.lock(); self.backoffUntil = until; self.lock.unlock()
+                self.persist {
+                    $0.backoffUntil = until
+                    $0.limits = Array((($0.limits ?? []) + [LimitHit(at: Date(), retryAfter: header)]).suffix(Self.keptLimitHits))
+                }
+                self.finish(.problem("Anthropic asked Reset to slow down; trying again in a few minutes"), done)
+                return
+            }
+            if code == 401 || code == 403 {
+                self.finish(.problem("Anthropic didn't accept the sign-in (HTTP \(code))"), done)
+                return
+            }
+            guard code == 200, let data, let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                self.finish(.problem("Unexpected reply from Anthropic (HTTP \(code))"), done)
+                return
+            }
+            let snap = Snapshot(fiveHour: Self.window(obj["five_hour"]), sevenDay: Self.window(obj["seven_day"]), fetchedAt: Date(), org: org)
+            self.persist { $0.lastGood = snap }
+            // Diagnostics: the usage windows exactly as received (percentages and reset times only).
+            var diag: [String: Any] = ["fetched": ISO8601DateFormatter().string(from: Date())]
+            for k in ["five_hour", "seven_day", "seven_day_opus", "seven_day_sonnet"] { diag[k] = obj[k] ?? NSNull() }
+            if let d = try? JSONSerialization.data(withJSONObject: diag, options: [.prettyPrinted, .sortedKeys]) {
+                try? d.write(to: WidgetSnapshot.url.deletingLastPathComponent().appendingPathComponent("live-usage.json"))
+            }
+            DispatchQueue.main.async {
+                self.needsSignIn = false
+                self.failingSince = nil
+                self.snapshot = snap
+                self.state = snap.fiveHour == nil && snap.sevenDay == nil
+                    ? .problem("Signed in, but Anthropic reports no usage windows for this account")
+                    : .ok(snap.fetchedAt)
+                done()
+            }
+        }.resume()
+    }
+
+    /// Whether a reading is for this entry: never one account's numbers on another's card. Readings and entries
+    /// that don't say whose they are still match, as before accounts were told apart.
+    static func belongs(_ snap: Snapshot, to s: WindowStatus) -> Bool {
+        guard let org = snap.org, let account = s.account else { return true }
+        return org == account
     }
 
     /// Fetch again right away, e.g. after the user signs Claude Code back in.
@@ -254,7 +321,7 @@ final class LiveClaude {
 
     /// Overlays live numbers on the transcript-based status.
     func apply(to s: inout WindowStatus, now: Date) {
-        guard let snap = snapshot, now.timeIntervalSince(snap.fetchedAt) < 15 * 60 else { return }
+        guard let snap = snapshot, now.timeIntervalSince(snap.fetchedAt) < 15 * 60, Self.belongs(snap, to: s) else { return }
         if let fh = snap.fiveHour {
             s.usedPercent = fh.percent
             // A reading can be up to 15 minutes old (polling slows when idle or when asked to); past 3 minutes the

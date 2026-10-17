@@ -22,7 +22,7 @@ struct WindowStatus: Identifiable, Equatable {
         var isHigh: Bool { (usedPercent ?? 0) >= Self.warnPercent }
     }
 
-    let id: String
+    var id: String
     var name: String
     var state: State
     /// 0...100 when the provider reports it.
@@ -41,6 +41,12 @@ struct WindowStatus: Identifiable, Equatable {
     var lastActivity: Date? = nil
     /// For Claude entries, the organization (account) they're for.
     var account: String? = nil
+    /// For Claude entries, the last activity from a session that names this account. `lastActivity` also counts
+    /// untagged events (subagent transcripts and the like, folded into the main entry), so it can't tell which
+    /// account you're using.
+    var lastTaggedActivity: Date? = nil
+    /// How long one window lasts, when the provider sets it (a custom tool's own length); otherwise see `Store.cardData`.
+    var windowLength: TimeInterval? = nil
 
     var resetsAt: Date? {
         if case .active(let d) = state { return d }

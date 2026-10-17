@@ -11,6 +11,11 @@ enum MCPServer {
         var snapshot: () -> WidgetSnapshot? = WidgetSnapshot.load
         var budgetURL: URL = Budget.url
         var running: () -> Bool = { WidgetSnapshot.appRunning() }
+        /// The account the calling agent runs on. The Claude desktop app tells the Claude Code it starts (and so
+        /// this server, its child), which can be another account than the terminal's: switching accounts in the
+        /// desktop app leaves the terminal signed in to the old one. A plain terminal Claude Code doesn't set it,
+        /// and then the report is for the terminal's account, the main entry.
+        var org: () -> String? = { ProcessInfo.processInfo.environment["CLAUDE_CODE_ORGANIZATION_UUID"].flatMap { $0.isEmpty ? nil : $0 } }
     }
 
     /// One NDJSON line in, at most one line out. Unparseable lines are ignored, as before the split.
@@ -36,7 +41,7 @@ enum MCPServer {
         case "initialize":
             let requested = params?["protocolVersion"] as? String ?? "2025-06-18"
             return result(["protocolVersion": requested, "capabilities": ["tools": [String: Any]()],
-                           "serverInfo": ["name": "reset", "version": "0.3.18"]])
+                           "serverInfo": ["name": "reset", "version": "0.3.19"]])
         case "tools/list":
             return result(["tools": tools])
         case "tools/call":
@@ -44,7 +49,8 @@ enum MCPServer {
             switch params?["name"] as? String {
             case "get_claude_usage":
                 let budget = Budget.load(from: env.budgetURL)
-                return result(content(usageReport(snapshot: env.snapshot(), budget: budget, now: env.now(), running: env.running())))
+                return result(content(usageReport(snapshot: env.snapshot(), budget: budget, now: env.now(), running: env.running(),
+                                                  org: env.org())))
             case "set_budget":
                 return result(content(setBudget(args, env: env)))
             case "clear_budget":
@@ -73,7 +79,7 @@ enum MCPServer {
     static let tools: [[String: Any]] = [
         [
             "name": "get_claude_usage",
-            "description": "How much of the Claude usage window is left, when it resets, whether it will run out first at the current pace, today's API-value spend, and the active pacing budget if one is set. usage_as_of says when the usage was last read; usage_may_be_stale is true when that's old or the live check is failing. Use it before starting large or parallel work, and between steps while a budget is set.",
+            "description": "How much of the Claude usage window is left, when it resets, whether it will run out first at the current pace, today's API-value spend, and the active pacing budget if one is set. usage_as_of says when the usage was last read; usage_may_be_stale is true when that's old or the live check is failing. With more than one Claude account it reports the one this session runs on, named in account. Use it before starting large or parallel work, and between steps while a budget is set.",
             "inputSchema": ["type": "object", "properties": [String: Any](), "additionalProperties": false],
         ],
         [
@@ -99,12 +105,13 @@ enum MCPServer {
     ]
 
     private static func setBudget(_ args: [String: Any], env: Environment) -> [String: Any] {
-        let (budget, problem) = Budget.from(arguments: args, now: env.now())
-        guard let budget else { return ["error": problem ?? "invalid arguments"] }
+        let (made, problem) = Budget.from(arguments: args, now: env.now())
+        guard var budget = made else { return ["error": problem ?? "invalid arguments"] }
+        budget.org = env.org()
         do { try budget.save(to: env.budgetURL) } catch {
             return ["error": "Couldn't save the budget: \(error.localizedDescription)"]
         }
-        let used = env.snapshot().flatMap { usedPercent($0, now: env.now()) }
+        let used = env.snapshot().flatMap { usedPercent($0, now: env.now(), org: env.org()) }
         return ["budget": budgetReport(budget, used: used)]
     }
 
@@ -117,8 +124,8 @@ enum MCPServer {
     static func usd(_ v: Double) -> NSDecimalNumber { NSDecimalNumber(string: String(format: "%.2f", v)) }
 
     /// The window's used percentage, 0 when a fresh window is ready, nil when unknown.
-    static func usedPercent(_ snap: WidgetSnapshot, now: Date) -> Double? {
-        guard let c = snap.claude else { return nil }
+    static func usedPercent(_ snap: WidgetSnapshot, now: Date, org: String? = nil) -> Double? {
+        guard let c = snap.claude(org: org) else { return nil }
         let ready = c.ready || (c.resetsAt.map { $0 <= now } ?? false)
         return ready ? 0 : c.used
     }
@@ -135,7 +142,7 @@ enum MCPServer {
     /// Past this a reading counts as old: polling is every 2 minutes in use and 5 when idle, so 10 means misses.
     static let staleReading: TimeInterval = 10 * 60
 
-    static func usageReport(snapshot: WidgetSnapshot?, budget: Budget?, now: Date, running: Bool = true) -> [String: Any] {
+    static func usageReport(snapshot: WidgetSnapshot?, budget: Budget?, now: Date, running: Bool = true, org: String? = nil) -> [String: Any] {
         guard let snap = snapshot else {
             var out: [String: Any] = ["error": "Reset isn't running or hasn't written usage yet. Open Reset.app."]
             // The budget is still worth reporting: it lives in its own file and stays true without the app.
@@ -143,9 +150,18 @@ enum MCPServer {
             return out
         }
         var out: [String: Any] = ["updated": iso.string(from: snap.updated)]
-        let used = usedPercent(snap, now: now)
-        if let c = snap.claude {
+        let used = usedPercent(snap, now: now, org: org)
+        let chosen = snap.claude(org: org)
+        if chosen == nil, org != nil {
+            // An account Reset hasn't listed yet (no session of its own in the last week until this one is scanned):
+            // say so instead of passing another account's window off as this one's.
+            out["claude"] = ["window": "unknown", "account_note": "Reset hasn't seen this account's usage yet; it reads new sessions every minute."]
+            out["advice"] = "How much of this account's window is left is unknown. Pace conservatively: keep subagents lean and batch tool calls."
+        }
+        if let c = chosen {
             var claude: [String: Any] = [:]
+            // With work and personal accounts, which one these numbers are for.
+            if snap.hasClaudeAccounts { claude["account"] = c.name }
             let ready = c.ready || (c.resetsAt.map { $0 <= now } ?? false)
             claude["window"] = ready ? "fresh window ready" : "active"
             if let u = c.used, !ready {
@@ -181,7 +197,9 @@ enum MCPServer {
             claude["estimated"] = c.estimate != nil
             if let e = c.estimate { claude["estimate_note"] = e }
             // Only a run-out that's still ahead and before this window's reset; a stale one isn't a warning.
-            let runsOut = snap.claudeRunsOutAt.flatMap { o in !ready && o > now && c.resetsAt.map { o < $0 } == true ? o : nil }
+            // The forecast is the main account's (it follows the live readings), so other accounts don't get it.
+            let runsOut = c.id != "claude" ? nil
+                : snap.claudeRunsOutAt.flatMap { o in !ready && o > now && c.resetsAt.map { o < $0 } == true ? o : nil }
             if let o = runsOut {
                 claude["projected_run_out_local"] = local.string(from: o)
                 claude["minutes_until_run_out"] = Int(o.timeIntervalSince(now) / 60)
@@ -229,7 +247,7 @@ enum MCPServer {
         if let budget {
             var b = budgetReport(budget, used: used)
             // The budget is judged on the same reading, so it carries the same warning.
-            if let c = snap.claude, c.used != nil, c.liveFailingSince != nil || c.usageAsOf.map({ now.timeIntervalSince($0) > staleReading }) == true {
+            if let c = chosen, c.used != nil, c.liveFailingSince != nil || c.usageAsOf.map({ now.timeIntervalSince($0) > staleReading }) == true {
                 b["warning"] = "Judged on usage read \(c.usageAsOf.map { local.string(from: $0) } ?? "a while ago"); it may be out of date."
             }
             out["budget"] = b

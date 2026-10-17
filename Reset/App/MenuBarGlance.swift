@@ -43,9 +43,10 @@ struct MenuBarGlance: Equatable {
     /// use, so while its window runs the bar follows it alone: a second account that's merely unused reads "ready"
     /// (a green "Pro ready" hid Team's 45% and its run-out warning), and its weekly limit or sooner reset says
     /// nothing about the window you're spending. Otherwise a weekly limit, then a fresh window, then the soonest reset.
-    static func pick(_ candidates: [WindowStatus], now: Date)
+    /// `main` is the account you're using (Store.activeClaudeId), which after a switch in the desktop app isn't the CLI's.
+    static func pick(_ candidates: [WindowStatus], main mainId: String = "claude", now: Date)
         -> (ready: WindowStatus?, soonest: WindowStatus?, blocked: WindowStatus?) {
-        if let main = candidates.first(where: { $0.id == "claude" }), main.resetsAt != nil,
+        if let main = candidates.first(where: { $0.id == mainId }), main.resetsAt != nil,
            (main.blockedUntil ?? .distantPast) <= now {
             return (nil, main, nil)
         }

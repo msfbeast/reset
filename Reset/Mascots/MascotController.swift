@@ -60,7 +60,19 @@ final class MascotController {
     /// Statuses that get a mascot right now.
     private var shown: [WindowStatus] {
         guard enabled, let store else { return [] }
-        return store.visible.filter { MascotArt.providers.contains($0.id) && !hidden.contains($0.id) }
+        return Self.shown(store.visible, activeClaude: store.activeClaudeId).filter { !hidden.contains($0.id) }
+    }
+
+    /// One mascot per tool. Claude's shows the account you're using (Store.activeClaudeId), so after switching
+    /// accounts in the desktop app it naps or wakes with that account's window, not the terminal's. It keeps the id
+    /// "claude", and with it its place on screen and whether it's hidden; its name label says which account it is.
+    static func shown(_ visible: [WindowStatus], activeClaude: String) -> [WindowStatus] {
+        visible.compactMap { s in
+            guard MascotArt.providers.contains(s.id) else { return nil }
+            guard s.id == "claude", activeClaude != "claude", var active = visible.first(where: { $0.id == activeClaude }) else { return s }
+            active.id = "claude"
+            return active
+        }
     }
 
     private var panelSize: NSSize { NSSize(width: size * 1.25, height: size * 1.55 + 26) }
@@ -76,10 +88,13 @@ final class MascotController {
             hosts[id] = nil
         }
         for s in list {
-            // A window that was running and is now ready just reset: play the waking pose for a minute.
+            // A window that was running and is now ready just reset: play the waking pose for a minute. Not when
+            // Claude's mascot moved to another account, whose window simply isn't running.
             let active = s.resetsAt != nil
-            if wasActive[s.id] == true && !active { lastReset[s.id] = Date() }
+            let sameAccount = shownAccount[s.id] == s.account
+            if wasActive[s.id] == true && !active && sameAccount { lastReset[s.id] = Date() }
             wasActive[s.id] = active
+            shownAccount[s.id] = s.account
             if panels[s.id] == nil { makePanel(for: s) }
         }
         refreshViews()
@@ -137,6 +152,9 @@ final class MascotController {
             )
         }
     }
+
+    /// Which Claude account each mascot last showed (see `shown`).
+    private var shownAccount: [String: String?] = [:]
 
     private var tickCount = 0
     private func tick() {

@@ -4,6 +4,7 @@ import Foundation
 /// Opt-in exact Claude usage: reads Claude Code's own sign-in from the Keychain and asks Anthropic's usage
 /// endpoint for the current 5-hour and weekly windows. Only usage numbers are fetched, the token is only
 /// ever sent to api.anthropic.com, and Reset never refreshes or rewrites it (that would sign Claude Code out).
+/// One more copy per other account signed in to the Claude desktop app does the same with that app's sign-in.
 final class LiveClaude {
     struct Window: Codable, Equatable { var percent: Double; var resetsAt: Date? }
     /// `org` is the account the reading is for (see `TokenAccount`); nil in readings saved before it was asked.
@@ -15,6 +16,13 @@ final class LiveClaude {
     /// there, while its plan comes from the Keychain, so after a switch it named one account with the other's plan.
     /// Only a hash of the token is kept, to know when the sign-in changed.
     struct TokenAccount: Codable, Equatable { var tokenHash: String; var org: String; var plan: String? }
+
+    /// Whose sign-in this copy reads.
+    enum Source: Equatable {
+        case claudeCode
+        /// The Claude desktop app's token for this organization (see ClaudeDesktopSignIn).
+        case desktop(org: String)
+    }
 
     /// When Reset last asked, until when Anthropic told it to wait, and the last good reading. Saved to
     /// live-schedule.json and re-read before every fetch, so a restart (or a second copy of the app) respects a
@@ -46,6 +54,11 @@ final class LiveClaude {
     static let freshFor: TimeInterval = 15 * 60
 
     static var scheduleURL: URL { WidgetSnapshot.url.deletingLastPathComponent().appendingPathComponent("live-schedule.json") }
+
+    /// A desktop-app account's own schedule, so one account's "slow down" doesn't hold back the others.
+    static func scheduleURL(org: String) -> URL {
+        scheduleURL.deletingLastPathComponent().appendingPathComponent("live-schedule-\(org.prefix(8)).json")
+    }
 
     static func loadSchedule(_ url: URL?) -> Schedule? {
         guard let url, let d = try? Data(contentsOf: url) else { return nil }
@@ -85,10 +98,12 @@ final class LiveClaude {
     private var backoffUntil = Date.distantPast
     private let lock = NSLock()
     private let scheduleURL: URL?
+    let source: Source
 
     /// With no `scheduleURL` nothing is read or written (tests).
-    init(scheduleURL: URL? = nil, now: Date = Date()) {
+    init(scheduleURL: URL? = nil, now: Date = Date(), source: Source = .claudeCode) {
         self.scheduleURL = scheduleURL
+        self.source = source
         guard let saved = Self.loadSchedule(scheduleURL) else { return }
         tokenAccount = saved.account
         lastAttempt = saved.lastAttempt
@@ -138,18 +153,27 @@ final class LiveClaude {
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let self else { return }
             // Test hook: `-simulateSignedOut YES` behaves as if Claude Code's sign-in expired.
-            if UserDefaults.standard.bool(forKey: "simulateSignedOut") {
+            if self.source == .claudeCode, UserDefaults.standard.bool(forKey: "simulateSignedOut") {
                 self.finish(.problem("Claude Code's sign-in has expired. Open Claude Code once and it renews itself"), done)
                 return
             }
-            guard let token = Self.readToken() else {
-                self.finish(.problem("Claude Code isn't signed in on this Mac, or Keychain access was denied"), done)
+            let token: Token?
+            switch self.source {
+            case .claudeCode: token = Self.readToken()
+            case .desktop(let org): token = ClaudeDesktopSignIn.token(org: org)
+            }
+            guard let token else {
+                self.finish(.problem(self.source == .claudeCode ? "Claude Code isn't signed in on this Mac, or Keychain access was denied"
+                                     : "The Claude desktop app's sign-in for this account has expired. Opening the desktop app renews it"), done)
                 return
             }
             if let exp = token.expiresAt, exp < Date() {
-                self.finish(.problem("Claude Code's sign-in has expired. Open Claude Code once and it renews itself"), done)
+                self.finish(.problem(self.source == .claudeCode ? "Claude Code's sign-in has expired. Open Claude Code once and it renews itself"
+                                     : "The Claude desktop app's sign-in for this account has expired. Opening the desktop app renews it"), done)
                 return
             }
+            // A desktop app sign-in is filed under its organization already; only Claude Code's needs asking.
+            if case .desktop(let org) = self.source { self.fetchUsage(token, org: org, done); return }
             let hash = Self.hash(token.access)
             let known = Self.loadSchedule(self.scheduleURL)?.account ?? self.tokenAccount
             if let known, known.tokenHash == hash {
@@ -172,11 +196,7 @@ final class LiveClaude {
     /// Asks Anthropic's profile endpoint (same host, same sign-in, needs the user:profile scope the usage
     /// endpoint also needs) which organization the token is for, and its plan.
     private static func fetchAccount(_ token: Token, _ done: @escaping (String?, String?) -> Void) {
-        var req = URLRequest(url: URL(string: "https://api.anthropic.com/api/oauth/profile")!, timeoutInterval: 20)
-        req.setValue("Bearer \(token.access)", forHTTPHeaderField: "Authorization")
-        req.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
-        req.setValue("application/json", forHTTPHeaderField: "Accept")
-        req.setValue("claude-cli/2.1 (external, cli)", forHTTPHeaderField: "User-Agent")
+        let req = request("profile", token: token)
         URLSession.shared.dataTask(with: req) { data, resp, _ in
             guard (resp as? HTTPURLResponse)?.statusCode == 200, let data,
                   let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { done(nil, nil); return }
@@ -189,7 +209,7 @@ final class LiveClaude {
     static func profileAccount(_ obj: [String: Any]) -> (org: String, plan: String?)? {
         guard let o = obj["organization"] as? [String: Any], let id = o["uuid"] as? String, !id.isEmpty else { return nil }
         let type = o["organization_type"] as? String
-        return (id, type.map { $0.hasPrefix("claude_") ? String($0.dropFirst("claude_".count)) : $0 })
+        return (id.lowercased(), type.map { $0.hasPrefix("claude_") ? String($0.dropFirst("claude_".count)) : $0 })
     }
 
     static func hash(_ token: String) -> String {
@@ -197,11 +217,7 @@ final class LiveClaude {
     }
 
     private func fetchUsage(_ token: Token, org: String?, _ done: @escaping () -> Void) {
-        var req = URLRequest(url: URL(string: "https://api.anthropic.com/api/oauth/usage")!, timeoutInterval: 20)
-        req.setValue("Bearer \(token.access)", forHTTPHeaderField: "Authorization")
-        req.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
-        req.setValue("application/json", forHTTPHeaderField: "Accept")
-        req.setValue("claude-cli/2.1 (external, cli)", forHTTPHeaderField: "User-Agent")
+        let req = Self.request("usage", token: token)
         URLSession.shared.dataTask(with: req) { data, resp, err in
             let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
             if let err { self.finish(.problem("Couldn't reach Anthropic: \(err.localizedDescription)"), done); return }
@@ -230,7 +246,7 @@ final class LiveClaude {
             // Diagnostics: the usage windows exactly as received (percentages and reset times only).
             var diag: [String: Any] = ["fetched": ISO8601DateFormatter().string(from: Date())]
             for k in ["five_hour", "seven_day", "seven_day_opus", "seven_day_sonnet"] { diag[k] = obj[k] ?? NSNull() }
-            if let d = try? JSONSerialization.data(withJSONObject: diag, options: [.prettyPrinted, .sortedKeys]) {
+            if self.source == .claudeCode, let d = try? JSONSerialization.data(withJSONObject: diag, options: [.prettyPrinted, .sortedKeys]) {
                 try? d.write(to: WidgetSnapshot.url.deletingLastPathComponent().appendingPathComponent("live-usage.json"))
             }
             DispatchQueue.main.async {
@@ -274,7 +290,7 @@ final class LiveClaude {
             let w = why.lowercased()
             needsSignIn = w.contains("sign-in") || w.contains("signed in") || w.contains("didn't accept")
         }
-        if case .problem(let why) = s {
+        if case .problem(let why) = s, source == .claudeCode {
             let diag: [String: Any] = ["fetched": ISO8601DateFormatter().string(from: Date()), "problem": why]
             if let d = try? JSONSerialization.data(withJSONObject: diag, options: .prettyPrinted) {
                 try? d.write(to: WidgetSnapshot.url.deletingLastPathComponent().appendingPathComponent("live-usage.json"))
@@ -319,6 +335,16 @@ final class LiveClaude {
         return Token(access: access, expiresAt: exp)
     }
 
+    /// A GET to one of Anthropic's OAuth endpoints ("usage", "profile"), sent the way Claude Code sends it.
+    static func request(_ endpoint: String, token: Token) -> URLRequest {
+        var req = URLRequest(url: URL(string: "https://api.anthropic.com/api/oauth/\(endpoint)")!, timeoutInterval: 20)
+        req.setValue("Bearer \(token.access)", forHTTPHeaderField: "Authorization")
+        req.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
+        req.setValue("application/json", forHTTPHeaderField: "Accept")
+        req.setValue("claude-cli/2.1 (external, cli)", forHTTPHeaderField: "User-Agent")
+        return req
+    }
+
     /// Overlays live numbers on the transcript-based status.
     func apply(to s: inout WindowStatus, now: Date) {
         guard let snap = snapshot, now.timeIntervalSince(snap.fetchedAt) < 15 * 60, Self.belongs(snap, to: s) else { return }
@@ -330,7 +356,7 @@ final class LiveClaude {
             if let r = fh.resetsAt, r > now { s.state = .active(resetsAt: r) }
             else if fh.percent == 0 { s.state = .ready }
             s.isEstimate = false
-            s.source = "Live from your Claude account"
+            s.source = source == .claudeCode ? "Live from your Claude account" : "Live, through the Claude desktop app's sign-in"
         }
         // Live weekly data is authoritative both ways: it sets the block when the limit is used up,
         // and clears a stale one (for example from an old transcript limit row) once it isn't.

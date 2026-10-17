@@ -23,8 +23,9 @@ struct ClaudeSource: WindowSource {
     /// One status per Claude account seen in the transcripts: "claude" for the account the Claude Code CLI is
     /// signed in to (live usage, auto-start and budgets go through the CLI), and "claude-<org>" for any other
     /// account used in the last week, each with its own window from its own sessions. With one account there's
-    /// just "Claude", as before.
-    func readAll(now: Date, account: ClaudeCLI.Account?) -> [WindowStatus] {
+    /// just "Claude", as before. `desktop` is the other accounts Reset reads live through the Claude desktop app,
+    /// with their plans: they're listed even without Claude Code sessions this week, and named by their plan.
+    func readAll(now: Date, account: ClaudeCLI.Account?, desktop: [String: String?] = [:]) -> [WindowStatus] {
         let root = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude/projects")
         guard FileManager.default.fileExists(atPath: root.path) else {
             var s = WindowStatus(id: id, name: "Claude", state: .unavailable("No ~/.claude/projects folder"), usedPercent: nil,
@@ -54,11 +55,12 @@ struct ClaudeSource: WindowSource {
             lookback = min(lookback * 2, maxLookback)
         }
 
-        let others = Self.otherOrgs(events: week, main: main)
+        let others = Self.others(used: Self.otherOrgs(events: week, main: main), desktop: Array(desktop.keys), main: main)
         var mainStatus = Self.status(id: id, name: "Claude", events: events, org: main ?? Self.currentOrg(under: root), now: now,
                                      canAutoStart: true)
         let ids = ["claude"] + others.map { "claude-" + $0.prefix(8) }
-        let labels = Self.accountLabels(ids: ids, defaults: [Self.planLabel(account?.plan) ?? "Claude Code"] + others.map { Self.otherLabel(org: $0) },
+        let labels = Self.accountLabels(ids: ids, defaults: [Self.planLabel(account?.plan) ?? "Claude Code"]
+                                            + others.map { Self.planLabel(desktop[$0] ?? nil) ?? Self.otherLabel(org: $0) },
                                         custom: Self.customNames)
         if !others.isEmpty { mainStatus.name = "Claude · " + labels[0] }
         func lastTagged(_ org: String?) -> Date? {
@@ -97,7 +99,9 @@ struct ClaudeSource: WindowSource {
            (configChangedAt ?? .distantPast) > (chosenAt ?? .distantPast) || current == nil { return c }
         let used = lastUse.filter { listed.contains($0.key) }
         guard let newest = used.max(by: { $0.value < $1.value }) else { return current }
-        guard let current, let mine = used[current] else { return current ?? newest.key }
+        guard let current else { return newest.key }
+        // An account with no sessions (one listed only through the desktop app) has been quiet since it was chosen.
+        let mine = used[current] ?? chosenAt ?? .distantPast
         if newest.key != current, now.timeIntervalSince(mine) >= quiet { return newest.key }
         return current
     }
@@ -119,6 +123,12 @@ struct ClaudeSource: WindowSource {
             last[o] = max(last[o] ?? .distantPast, e.time)
         }
         return last.sorted { $0.value > $1.value }.map(\.key)
+    }
+
+    /// Every account besides the main one: those used this week, most recent first, then any others signed in to
+    /// the Claude desktop app, in a fixed order so their entries don't swap places between scans.
+    static func others(used: [String], desktop: [String], main: String?) -> [String] {
+        used + desktop.filter { $0 != main && !used.contains($0) }.sorted()
     }
 
     /// Names given to accounts in Settings, by status id ("claude", "claude-<org>").

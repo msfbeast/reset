@@ -237,7 +237,7 @@ get_claude_usage   set_budget   clear_budget</pre>
     <h2>Your logs stay on your Mac.</h2>
     <p class="lead">Reset reads Claude Code's local transcripts and keeps only token counts, models, times, tool names, project folders and session titles. Never your prompts or Claude's replies.</p>
     <div class="privacy">
-      <div class="card"><h3>Only if you turn it on</h3><p><strong>Live usage</strong> sends Claude Code's own sign-in to api.anthropic.com to read your exact usage. <strong>Phone alerts</strong> send reset times to your ntfy server. That's it.</p></div>
+      <div class="card"><h3>Only if you turn it on</h3><p><strong>Live usage</strong> sends Claude Code's own sign-in to api.anthropic.com to read your exact usage, and the Claude desktop app's for its other accounts if you allow it. <strong>Cursor</strong> sends the Cursor app's sign-in to api2.cursor.sh to read this month's usage. <strong>Phone alerts</strong> send reset times to your ntfy server. That's it.</p></div>
       <div class="card"><h3>No accounts, no analytics</h3><p>Reset runs no servers of its own. A daily update check asks GitHub whether a newer version exists, and you can switch it off. The code is MIT licensed and all on GitHub.</p></div>
     </div>
   </div>
@@ -257,7 +257,7 @@ get_claude_usage   set_budget   clear_budget</pre>
     <div class="faq" style="margin-top:44px">
       <h3>Questions</h3>
       <details><summary>Why does it say "estimated"?</summary><p>Without live usage, Reset estimates from your Claude Code activity and says so. Turn on Settings → General → Live usage for exact numbers.</p></details>
-      <details><summary>Does it work with Codex, Gemini CLI or Antigravity?</summary><p>Yes: Codex reads its own session logs, Gemini CLI resets at midnight Pacific, and Antigravity reads its local server while the app is open. You can also add any tool with a manual countdown.</p></details>
+      <details><summary>Does it work with Codex, Gemini CLI, Antigravity or Cursor?</summary><p>Yes: Codex reads its own session logs, Gemini CLI resets at midnight Pacific, and Antigravity reads its local server while the app is open. Cursor shows this month's usage once you switch it on in Settings, using the Cursor app's sign-in. You can also add any tool with a manual countdown.</p></details>
       <details><summary>Does auto-start use my quota?</summary><p>A tiny bit: one short message to the cheapest model per window. It only runs for a window Reset watched run out, never when you switch it on.</p></details>
       <details><summary>Something's not right.</summary><p>See <a href="https://github.com/msfbeast/reset#troubleshooting">Troubleshooting</a>, or use Settings → Advanced → Report a problem. It pre-fills a GitHub issue with versions and on/off states only, and you see it all before sending.</p></details>
     </div>

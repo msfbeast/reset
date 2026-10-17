@@ -65,5 +65,12 @@ final class AccuracyTests: XCTestCase {
                        "usage unknown · live usage only reads the account Claude Code in Terminal is signed in to")
         XCTAssertTrue(UsageAccuracy.otherAccountNote(isEstimate: true, usageKnown: true)?.hasPrefix("estimated") == true)
         XCTAssertNil(UsageAccuracy.otherAccountNote(isEstimate: false, usageKnown: true), "an exact reset with a reading is solid")
+        // With the desktop app's accounts on, one still estimated is one the desktop app isn't signed in to.
+        XCTAssertEqual(UsageAccuracy.otherAccountNote(isEstimate: true, usageKnown: false, desktopOn: true),
+                       "estimated · not signed in to the Claude desktop app")
+        XCTAssertNil(UsageAccuracy.desktopAccountNote(isEstimate: false, usageKnown: true, problem: nil), "live through the desktop app")
+        XCTAssertEqual(UsageAccuracy.desktopAccountNote(isEstimate: true, usageKnown: false, problem: nil),
+                       "estimated · waiting for live usage through the Claude desktop app", "no reading on it yet still says why")
+        XCTAssertEqual(UsageAccuracy.desktopAccountNote(isEstimate: true, usageKnown: false, problem: "expired"), "estimated · expired")
     }
 }

@@ -158,7 +158,8 @@ struct MenuView: View {
         }
         if let b = store.budget, store.budgetEntry?.id == h.id { budgetNotice(b) }
         if h.id.hasPrefix("claude-"), let c = claude {
-            Label("Live usage and auto-start follow \(c.name), the account Claude Code in Terminal is signed in to",
+            // Read live through the desktop app, only auto-start and the widgets are left with the terminal's account.
+            Label("\(store.desktopReading(for: h) == nil ? "Live usage and auto-start" : "Auto-start and the widgets") follow \(c.name), the account Claude Code in Terminal is signed in to",
                   systemImage: "terminal")
                 .font(.system(size: 11)).foregroundStyle(Theme.dim).lineLimit(2)
         }

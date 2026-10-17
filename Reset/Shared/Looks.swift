@@ -100,6 +100,8 @@ struct CountdownText: View {
 
     static func hm(_ s: TimeInterval) -> String {
         let s = max(0, Int(s)), h = s / 3600, m = (s % 3600) / 60
+        // A month-long window (Cursor) or a weekly limit: "127:30" read as a clock.
+        if h >= 24 { return "\(h / 24)d \(h % 24)h" }
         return h > 0 ? "\(h):\(String(format: "%02d", m))" : "0:\(String(format: "%02d", m))"
     }
 }

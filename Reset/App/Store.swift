@@ -32,12 +32,47 @@ final class Store {
     var liveClaudeEnabled: Bool {
         didSet {
             UserDefaults.standard.set(liveClaudeEnabled, forKey: "liveClaude")
-            if liveClaudeEnabled { note("Live Claude usage on") } else { liveClaude.reset() }
+            if liveClaudeEnabled {
+                note("Live Claude usage on")
+                // Switching live usage off dropped the desktop app's key; get it back if that option is still on.
+                if desktopAccountsEnabled { allowDesktop() }
+            } else { liveClaude.reset(); dropDesktopLive() }
             refresh()
         }
     }
     /// Its schedule and last reading are saved, so restarts respect a "slow down" (demo mode never touches it).
     let liveClaude = LiveClaude(scheduleURL: Demo.isOn ? nil : LiveClaude.scheduleURL)
+    /// Live usage for the Claude desktop app's other accounts too (see ClaudeDesktopSignIn). Only with live usage on.
+    var desktopAccountsEnabled: Bool {
+        didSet {
+            UserDefaults.standard.set(desktopAccountsEnabled, forKey: "liveClaudeDesktop")
+            if desktopAccountsEnabled { allowDesktop() } else { dropDesktopLive(); refresh() }
+        }
+    }
+    /// One per other account signed in to the desktop app, by organization.
+    private var desktopLive: [String: LiveClaude] = [:]
+    private(set) var desktopState: ClaudeDesktopSignIn.State = .off
+    /// How many accounts are read through the desktop app, beyond the one Claude Code is signed in to.
+    private(set) var desktopAccounts = 0
+    /// Listed, but their sign-in has expired until the desktop app is opened and renews it.
+    private(set) var desktopExpired = 0
+
+    /// Reads the desktop app's key (macOS asks, unless it was told "Always Allow"), then rescans.
+    func allowDesktop() {
+        ClaudeDesktopSignIn.allow { [weak self] ok in
+            self?.note(ok ? "Reading the Claude desktop app's accounts" : "No access to the Claude desktop app's sign-in")
+            self?.refresh()
+        }
+    }
+
+    private func dropDesktopLive() {
+        desktopLive.values.forEach { $0.reset() }
+        desktopLive = [:]
+        desktopState = .off
+        desktopAccounts = 0
+        desktopExpired = 0
+        ClaudeDesktopSignIn.forget()
+    }
     /// Saved across restarts, except in demo mode, which mustn't touch real files.
     let forecast = Forecast(storeURL: Demo.isOn ? nil : Forecast.defaultURL)
     var look: Look = Look(rawValue: UserDefaults.standard.string(forKey: "look") ?? "") ?? .glow {
@@ -50,7 +85,7 @@ final class Store {
 
     /// What a look card needs for one provider, with the mascot in its current mood.
     func cardData(for s: WindowStatus) -> CardData {
-        let window: TimeInterval = s.windowLength ?? (s.id == "gemini" ? 86400 : 5 * 3600)
+        let window = s.windowLength ?? WindowStatus.length(of: s.id)
         return CardData(id: s.id, name: s.name, color: Theme.color(for: s.id), windowStart: s.resetsAt?.addingTimeInterval(-window),
                         resetsAt: s.resetsAt, ready: s.state == .ready, blockedUntil: s.blockedUntil, used: s.usedPercent,
                         mascot: MascotArt.image(s.id, Mood.of(s, justReset: false)).map { Image(nsImage: $0) }, windowLength: window,
@@ -60,7 +95,16 @@ final class Store {
     /// "estimated · live usage off" and the like, or nil when the numbers are solid. Only Claude has a live
     /// source to fall back from; the others are exact from their own logs or plainly labelled as estimates.
     func estimateNote(for s: WindowStatus) -> String? {
-        if s.id.hasPrefix("claude-") { return UsageAccuracy.otherAccountNote(isEstimate: s.isEstimate, usageKnown: s.usedPercent != nil) }
+        if s.id.hasPrefix("claude-") {
+            // Read live through the desktop app: estimated only while that reading fails, and then it says why.
+            if let live = desktopReading(for: s) {
+                var problem: String?
+                if case .problem(let p) = live.state { problem = p }
+                return UsageAccuracy.desktopAccountNote(isEstimate: s.isEstimate, usageKnown: s.usedPercent != nil, problem: problem)
+            }
+            return UsageAccuracy.otherAccountNote(isEstimate: s.isEstimate, usageKnown: s.usedPercent != nil,
+                                                  desktopOn: liveClaudeEnabled && desktopAccountsEnabled)
+        }
         guard s.id == "claude" else { return nil }
         if case .unavailable = s.state { return nil }
         // Only a reported problem counts as not working; still loading is "waiting", not "unavailable".
@@ -103,9 +147,14 @@ final class Store {
         ntfyTopic = d.string(forKey: "ntfyTopic") ?? ""
         commands = Self.load("commands") ?? Kicker.defaultCommands()
         liveClaudeEnabled = d.bool(forKey: "liveClaude")
+        desktopAccountsEnabled = d.bool(forKey: "liveClaudeDesktop")
         if prefs["antigravity"] == nil {
             let has = FileManager.default.fileExists(atPath: "/Applications/Antigravity.app")
             prefs["antigravity"] = ProviderPrefs(enabled: has, alert: has)
+        }
+        // Off until switched on: reading Cursor sends its sign-in to Cursor's servers (see CursorSource).
+        if prefs["cursor"] == nil {
+            prefs["cursor"] = ProviderPrefs(enabled: false, alert: false)
         }
         if prefs["gemini"] == nil {
             let hasGemini = FileManager.default.fileExists(atPath: NSHomeDirectory() + "/.gemini")
@@ -119,7 +168,10 @@ final class Store {
         keepAwake.start()
         updater.start()
         usage.start()
+        CursorSource.onUpdate = { [weak self] in self?.cursorUpdated() }
         refresh()
+        // The desktop app's key is kept in memory only, so it's read again each launch; scans never read it.
+        if !Demo.isOn, liveClaudeEnabled && desktopAccountsEnabled { allowDesktop() }
         // A 1 s tick keeps the countdowns live; disk is rescanned every 60 s or on demand.
         tick = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.onTick() }
         startListener = StartRequest.Listener(name: StartRequest.name("claude")) { [weak self] in self?.startFromWidget("claude") }
@@ -183,12 +235,23 @@ final class Store {
 
     func setPrefs(_ id: String, _ update: (inout ProviderPrefs) -> Void) {
         var p = prefs(for: id)
-        let wasAuto = p.autoStart
+        let wasAuto = p.autoStart, wasEnabled = p.enabled
         update(&p)
         prefs[id] = p
         mascots.sync()
         if p.autoStart && !wasAuto { auto.armedAt[id] = Date(); auto.kickDue[id] = nil }
         syncAlerts()
+        // Cursor only reads while it's on, so read it now rather than at the next scan.
+        if id == "cursor", p.enabled, !wasEnabled { refresh() }
+    }
+
+    /// A Cursor reading landed. Shown straight away, since a full scan can take a while, then rescanned so
+    /// alerts and anything else that follows the statuses catch up.
+    private func cursorUpdated() {
+        if let i = statuses.firstIndex(where: { $0.id == "cursor" }) {
+            statuses[i] = CursorSource(enabled: prefs(for: "cursor").enabled).read(now: Date())
+        }
+        refresh()
     }
 
     var visible: [WindowStatus] { statuses.filter { prefs(for: $0.id).enabled } }
@@ -279,16 +342,24 @@ final class Store {
         let extras = claudeExtraStarts
         let custom = self.custom
         let signIn = liveClaudeEnabled ? liveClaude.tokenAccount : nil
+        let desktopOn = liveClaudeEnabled && desktopAccountsEnabled
+        let cursorOn = prefs(for: "cursor").enabled
         scanQueue.async { [weak self] in
             let t = Date()
-            // One Claude entry per account (see ClaudeSource.readAll), then the other tools.
             let cli = ClaudeCLI.resolve(signIn: signIn, status: ClaudeCLI.account(now: t))
             let configOrg = ClaudeCLI.configOrg()
-            var list = ClaudeSource(extraStarts: extras).readAll(now: t, account: cli)
+            // Only the organizations and plans leave this queue; the tokens are read again for each fetch.
+            let desktop = desktopOn ? ClaudeDesktopSignIn.read(now: t) : (state: .off, accounts: [:])
+            let desktopState = desktop.state
+            let desktopPlans = desktop.accounts.filter { $0.key != cli?.orgId }.mapValues(\.plan)
+            let desktopUsable = Set(desktop.accounts.filter { ClaudeDesktopSignIn.usable($0.value, now: t) }.keys)
+            // One Claude entry per account (see ClaudeSource.readAll), then the other tools.
+            var list = ClaudeSource(extraStarts: extras).readAll(now: t, account: cli, desktop: desktopPlans)
             list += [
                 CodexSource().read(now: t),
                 GeminiSource().read(now: t),
                 AntigravitySource().read(now: t),
+                CursorSource(enabled: cursorOn).read(now: t),
             ]
             list += custom.map { $0.status(now: t) }
             DispatchQueue.main.async {
@@ -305,6 +376,21 @@ final class Store {
                     if let sec = list[i].secondary {
                         self.warnIfWeeklyHigh(list[i].name, sec)
                     }
+                }
+                // Checked again here: the option may have been turned off while this scan ran.
+                if desktopOn, self.liveClaudeEnabled, self.desktopAccountsEnabled {
+                    self.desktopState = desktopState
+                    var liveCount = 0, expired = 0
+                    for org in desktopPlans.keys {
+                        guard let i = list.firstIndex(where: { $0.id == "claude-" + org.prefix(8) }) else { continue }
+                        let live = self.desktopLive[org] ?? LiveClaude(scheduleURL: LiveClaude.scheduleURL(org: org), source: .desktop(org: org))
+                        self.desktopLive[org] = live
+                        live.apply(to: &list[i], now: Date())
+                        live.poll(interval: LiveClaude.interval(lastActivity: list[i].lastActivity)) { [weak self] in self?.refresh() }
+                        if desktopUsable.contains(org) { liveCount += 1 } else { expired += 1 }
+                    }
+                    self.desktopAccounts = liveCount
+                    self.desktopExpired = expired
                 }
                 self.statuses = list
                 self.updateActiveClaude(list, configOrg: configOrg, now: t)
@@ -486,7 +572,9 @@ final class Store {
             ["id": s.id, "enabled": prefs(for: s.id).enabled, "state": "\(s.state)", "used": s.usedPercent ?? NSNull(),
              "resetsAt": d(s.resetsAt), "estimate": s.isEstimate, "source": s.source, "blockedUntil": d(s.blockedUntil)]
         }
-        out["live"] = ["enabled": liveClaudeEnabled, "state": "\(liveClaude.state)", "needsSignIn": liveClaude.needsSignIn]
+        out["live"] = ["enabled": liveClaudeEnabled, "state": "\(liveClaude.state)", "needsSignIn": liveClaude.needsSignIn,
+                       "verifiedOrg": liveClaude.tokenAccount != nil]
+        out["liveDesktop"] = ["enabled": desktopAccountsEnabled, "state": "\(desktopState)", "accounts": desktopAccounts, "expired": desktopExpired]
         out["forecast"] = d(forecast.runsOutAt)
         out["autoStart"] = ["claude": prefs(for: "claude").autoStart, "command": commands["claude"] ?? "",
                             "kickDue": auto.kickDue.mapValues { "\(iso.string(from: $0.reset)) tries \($0.attempts)" },
@@ -672,9 +760,16 @@ final class Store {
     }
 
     /// When an entry's usage % was read: the live check's last good answer for Claude, else the source's own time.
+    /// The desktop app's live reading for another Claude account, when Reset reads one for it.
+    func desktopReading(for s: WindowStatus) -> LiveClaude? {
+        guard s.id.hasPrefix("claude-"), liveClaudeEnabled, desktopAccountsEnabled, let org = s.account else { return nil }
+        return desktopLive[org]
+    }
+
     private func usageReadAt(_ s: WindowStatus) -> Date? {
         guard s.usedPercent != nil else { return nil }
         if s.id == "claude", liveClaudeEnabled, !s.isEstimate, let f = liveClaude.snapshot?.fetchedAt { return f }
+        if !s.isEstimate, let f = desktopReading(for: s)?.snapshot?.fetchedAt { return f }
         return s.usageAsOf
     }
 
@@ -719,8 +814,10 @@ final class Store {
             return .init(id: s.id, name: s.name, resetsAt: s.resetsAt, ready: s.state == .ready, available: available,
                          used: s.usedPercent, blockedUntil: s.blockedUntil, estimate: estimateNote(for: s),
                          weeklyUsed: s.secondary?.usedPercent, weeklyResetsAt: s.secondary?.resetsAt,
-                         usageAsOf: usageReadAt(s), liveFailingSince: s.id == "claude" && liveClaudeEnabled ? liveClaude.failingSince : nil,
-                         liveProblem: s.id == "claude" && liveClaudeEnabled ? liveProblemText : nil, org: s.account)
+                         usageAsOf: usageReadAt(s), liveFailingSince: s.id == "claude" && liveClaudeEnabled ? liveClaude.failingSince : desktopReading(for: s)?.failingSince,
+                         liveProblem: s.id == "claude" && liveClaudeEnabled ? liveProblemText : desktopReading(for: s).flatMap { l in
+                             if case .problem(let why) = l.state { return why } else { return nil } },
+                         org: s.account)
         }
         let providers = visible.filter { MascotArt.providers.contains($0.id) }.map(provider)
         // 7 days: the week widget counts this week's windows from these (5 undercounted it); the barcode draws its own 5 rows.

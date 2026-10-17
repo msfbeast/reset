@@ -277,6 +277,12 @@ final class ActiveAccountTests: XCTestCase {
         XCTAssertEqual(active(current: "team", chosen: 5, config: "pro", changed: 90, use: ["team": 0, "pro": 60]), "team")
     }
 
+    func testAnAccountWithNoSessionsHandsTheCardBack() {
+        // Pro is listed only through the desktop app; the terminal keeps working on Team.
+        XCTAssertEqual(active(current: "pro", chosen: 30, config: "pro", changed: 31, use: ["team": 0]), "team")
+        XCTAssertEqual(active(current: "pro", chosen: 2, config: "pro", changed: 3, use: ["team": 0]), "pro", "not straight after the switch")
+    }
+
     func testFirstLaunchStartsWithTheConfigsAccount() {
         XCTAssertEqual(active(current: nil, chosen: nil, config: "pro", use: ["team": 0, "pro": 30]), "pro")
         XCTAssertEqual(active(current: nil, chosen: nil, config: nil, use: ["team": 0, "pro": 30]), "team")

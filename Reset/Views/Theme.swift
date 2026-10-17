@@ -14,6 +14,7 @@ enum Theme {
         case "codex": return Color(hex: 0x00E08F)
         case "gemini": return Color(hex: 0x6E8EFF)
         case "antigravity": return Color(hex: 0x3D9BFF)
+        case "cursor": return Color(hex: 0xB18CFF)
         // A second Claude account: Claude's family, but coral so the two can be told apart.
         case let s where s.hasPrefix("claude-"): return Color(hex: 0xFF7F5C)
         default: return Color(hex: 0xFF4A5E)

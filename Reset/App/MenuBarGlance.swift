@@ -150,6 +150,8 @@ struct MenuBarGlance: Equatable {
         if s.id == "claude" { return "" }
         // A second Claude account is named by its plan ("Claude · Pro" → "Pro"); "C" would read as Codex.
         if s.id.hasPrefix("claude-"), let label = s.name.components(separatedBy: " · ").last { return label + " " }
+        // Cursor and Codex both start with C.
+        if s.id == "cursor" { return "Cu " }
         return "\(s.name.prefix(1)) "
     }
 }

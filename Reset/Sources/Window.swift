@@ -52,6 +52,15 @@ struct WindowStatus: Identifiable, Equatable {
         if case .active(let d) = state { return d }
         return nil
     }
+
+    /// How long one window lasts: Gemini CLI's quota is daily, Cursor's a billing month, the rest 5 hours.
+    static func length(of id: String) -> TimeInterval {
+        switch id {
+        case "gemini": return 86400
+        case "cursor": return 30 * 86400
+        default: return 5 * 3600
+        }
+    }
 }
 
 protocol WindowSource {

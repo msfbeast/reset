@@ -41,8 +41,9 @@ final class Alerts {
             let id = "\(prefix)\(w.id)-\(Self.minuteKey(at))\(auto ? "-auto" : "")"
             // "Send a message to start it" was wrong when auto-start was about to do exactly that.
             let body = w.blockedUntil.map { "Session window is fresh, but the \(w.secondary?.label.lowercased() ?? "longer") limit lasts until \(Fmt.when($0))." }
-                ?? (auto ? "A fresh window is ready. Auto-start will open it in a couple of minutes."
-                         : "A fresh window is ready. Send a message to start it.")
+                ?? (w.id == "cursor" ? "A new month of usage has started." // a billing month, not a window to start
+                    : auto ? "A fresh window is ready. Auto-start will open it in a couple of minutes."
+                    : "A fresh window is ready. Send a message to start it.")
             let canStart = !auto && w.blockedUntil == nil && startable.contains(w.id)
             wanted[id] = request(id: id, title: "\(w.name) has reset", body: body, at: at,
                                  category: canStart ? Category.start : nil, provider: w.id)
@@ -150,7 +151,8 @@ final class Alerts {
             inFlight.insert(w.id)
             let id = w.id
             post(url: dest, sid: Self.sid(id), title: "\(w.name) has reset",
-                 body: "Fresh window ready since \(Fmt.clock.string(from: at)).", at: at, priority: 4, log: log) { [weak self] ok in
+                 body: (id == "cursor" ? "New month of usage since " : "Fresh window ready since ") + "\(Fmt.clock.string(from: at)).",
+                 at: at, priority: 4, log: log) { [weak self] ok in
                 guard let self else { return }
                 self.inFlight.remove(id)
                 guard ok else { return }  // not recorded, so the next rescan retries

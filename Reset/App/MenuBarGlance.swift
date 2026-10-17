@@ -5,6 +5,19 @@ import SwiftUI
 /// left, red when the window is nearly empty or the pace runs out before the reset, green when a fresh window is
 /// waiting, and a quiet moon during a weekly limit. Pure, so the choices are tested.
 struct MenuBarGlance: Equatable {
+    /// Which limits to show, from Settings → Appearance. A tool without a weekly reading shows its 5-hour window.
+    enum Limits: String, CaseIterable, Identifiable {
+        case session, weekly, both
+        var id: String { rawValue }
+        var label: String {
+            switch self {
+            case .session: return "5-hour"
+            case .weekly: return "Weekly"
+            case .both: return "Both"
+            }
+        }
+    }
+
     enum Tone: String {
         case normal      // orange pill
         case low         // red pill: little left
@@ -15,6 +28,8 @@ struct MenuBarGlance: Equatable {
 
     var tone: Tone
     var text: String
+    /// The weekly limit, drawn under `text` when both limits are shown.
+    var detail: String? = nil
     /// Claude Code is signed out, so live usage is paused; a small warning sign goes in front.
     var warning = false
     /// What VoiceOver says. The pill is an image, so without this it would be silent; spelled out in words,
@@ -40,7 +55,44 @@ struct MenuBarGlance: Equatable {
     }
 
     static func make(ready: WindowStatus?, soonest: WindowStatus?, blocked: WindowStatus?, runsOutAt: Date?,
-                     signedOut: Bool, now: Date) -> MenuBarGlance? {
+                     signedOut: Bool, limits: Limits = .session, now: Date) -> MenuBarGlance? {
+        let g = session(ready: ready, soonest: soonest, blocked: blocked, runsOutAt: runsOutAt, signedOut: signedOut, now: now)
+        // A used-up weekly limit already shows on its own, and a tool without a weekly reading keeps its 5-hour window.
+        guard limits != .session, var g, g.tone != .blocked, let s = ready ?? soonest, let week = s.secondary,
+              let left = weeklyLeft(s, now: now) else { return g }
+        let text = "wk \(roughly(week.resetsAt.timeIntervalSince(now))) · \(Int(left.rounded()))%"
+        // Red from the point the menu, status line and notification warn about the weekly limit.
+        let low = week.isHigh
+        let spoken = "weekly limit \(Int(left.rounded())) percent left, resets \(Fmt.when(week.resetsAt, now: now))" + (low ? ", running low" : "")
+        if limits == .weekly {
+            // The 5-hour window's urgent states still set the colour: green when a fresh window is waiting, red when
+            // today's pace runs out first. Weekly mode used to turn those plain orange, hiding the pill's main signals.
+            let keep = g.tone == .ready || g.tone == .runningOut
+            let lead = (g.warning ? "Claude Code is signed out. " : "") + spokenName(s) + ": "
+            return MenuBarGlance(tone: keep ? g.tone : (low ? .low : .normal), text: prefix(s) + text, warning: g.warning,
+                                 spoken: keep ? g.spoken + "; " + spoken : lead + spoken)
+        }
+        g.detail = text
+        if low, g.tone == .normal { g.tone = .low }
+        g.spoken += "; " + spoken
+        return g
+    }
+
+    /// "3d", "18h", "45m": a weekly reset needs no minutes, and it keeps the menu's rows narrow.
+    static func roughly(_ interval: TimeInterval) -> String {
+        let m = max(0, Int(interval / 60))
+        if m >= 1440 { return "\(m / 1440)d" }
+        return m >= 60 ? "\(m / 60)h" : "\(m)m"
+    }
+
+    /// Percent of the weekly limit left, when the tool reports it and it hasn't reset yet.
+    static func weeklyLeft(_ s: WindowStatus, now: Date) -> Double? {
+        guard let w = s.secondary, w.label.hasPrefix("Weekly"), w.resetsAt > now, let used = w.usedPercent else { return nil }
+        return max(0, 100 - used)
+    }
+
+    private static func session(ready: WindowStatus?, soonest: WindowStatus?, blocked: WindowStatus?, runsOutAt: Date?,
+                                signedOut: Bool, now: Date) -> MenuBarGlance? {
         // A weekly limit outranks everything: no countdown or "ready" would be true until it lifts.
         if let b = blocked, let until = b.blockedUntil, until > now {
             return MenuBarGlance(tone: .blocked, text: prefix(b) + Fmt.when(until, now: now),
@@ -117,12 +169,21 @@ enum MenuBarPill {
         let (fill, ink) = colors(g.tone)
         let view = HStack(spacing: 3) {
             if g.warning { Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 9.5, weight: .bold)) }
-            Text(g.text).font(.system(size: 12, weight: .semibold).monospacedDigit())
+            if let detail = g.detail {
+                // Both limits, one above the other, small enough to fit the menu bar's height.
+                VStack(alignment: .leading, spacing: -1) {
+                    Text(g.text).font(.system(size: 9, weight: .bold).monospacedDigit())
+                    // Softer than the session line, except on red, where white needs all the contrast it has.
+                    Text(detail).font(.system(size: 9, weight: .semibold).monospacedDigit()).opacity(ink == .white ? 1 : 0.75)
+                }
+            } else {
+                Text(g.text).font(.system(size: 12, weight: .semibold).monospacedDigit())
+            }
         }
         .foregroundColor(ink)
-        .padding(.horizontal, 7)
-        .frame(height: 17)
-        .background(Capsule().fill(fill))
+        .padding(.horizontal, g.detail == nil ? 7 : 6)
+        .frame(height: g.detail == nil ? 17 : 21)
+        .background(RoundedRectangle(cornerRadius: g.detail == nil ? 8.5 : 6, style: .continuous).fill(fill))
         .fixedSize()
         let r = ImageRenderer(content: view)
         r.scale = NSScreen.main?.backingScaleFactor ?? 2

@@ -43,6 +43,10 @@ final class Store {
     var look: Look = Look(rawValue: UserDefaults.standard.string(forKey: "look") ?? "") ?? .glow {
         didSet { UserDefaults.standard.set(look.rawValue, forKey: "look"); lastWidgetData = nil; writeWidgetSnapshot() }
     }
+    /// Which limits the menu bar pill and the menu's rows show (Settings → Appearance).
+    var limitsShown: MenuBarGlance.Limits = MenuBarGlance.Limits(rawValue: UserDefaults.standard.string(forKey: "limitsShown") ?? "") ?? .session {
+        didSet { UserDefaults.standard.set(limitsShown.rawValue, forKey: "limitsShown") }
+    }
 
     /// What a look card needs for one provider, with the mascot in its current mood.
     func cardData(for s: WindowStatus) -> CardData {
@@ -208,7 +212,7 @@ final class Store {
     var glance: MenuBarGlance? {
         let p = MenuBarGlance.pick(barCandidates, now: now)
         return MenuBarGlance.make(ready: p.ready, soonest: p.soonest, blocked: p.blocked, runsOutAt: runsOut,
-                                  signedOut: liveNeedsSignIn, now: now)
+                                  signedOut: liveNeedsSignIn, limits: limitsShown, now: now)
     }
 
     /// A tracked provider with a fresh window waiting, shown in the bar ahead of any countdown.

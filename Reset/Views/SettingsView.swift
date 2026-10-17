@@ -327,8 +327,11 @@ struct SettingsView: View {
                     Text("Colored pill").tag("pill")
                     Text("Text").tag("text")
                 }
+                Picker("Limits", selection: $store.limitsShown) {
+                    ForEach(MenuBarGlance.Limits.allCases) { Text($0.label).tag($0) }
+                }
             } footer: {
-                Text("Colored pill: the countdown and what's left, orange as usual, red when the window is nearly empty or your pace runs out before the reset, green when a fresh window is waiting. Text: just the countdown.")
+                Text("Colored pill: the countdown and what's left, orange as usual, red when the window is nearly empty or your pace runs out before the reset, green when a fresh window is waiting. Text: just the countdown.\n\nLimits: Weekly shows the weekly limit in the pill and the menu's rows instead of the session window, Both shows it underneath. Only where Reset can read a weekly limit; for Claude, that needs live usage.")
                     .foregroundStyle(.secondary)
             }
 

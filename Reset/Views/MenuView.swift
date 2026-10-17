@@ -278,9 +278,24 @@ struct MiniProviderRow: View {
             }
             Text(status.name).font(.system(size: 12, weight: .medium))
             Spacer()
-            HealthDots(left: d.left(at: store.now), color: Theme.color(for: status.id))
-            CountdownText(d: d, now: store.now).font(.system(size: 12).monospacedDigit()).foregroundStyle(Theme.dim)
-                .frame(width: 50, alignment: .trailing)
+            // The weekly limit under the 5-hour one, or instead of it, as chosen in Settings → Appearance.
+            let weekly = store.limitsShown == .session ? nil : MenuBarGlance.weeklyLeft(status, now: store.now)
+            VStack(alignment: .trailing, spacing: 3) {
+                if store.limitsShown != .weekly || weekly == nil {
+                    HealthDots(left: d.left(at: store.now), color: Theme.color(for: status.id))
+                }
+                // Dimmer, like the weekly line in the menu bar pill, so the two rows read apart.
+                if let w = weekly { HealthDots(left: w / 100, color: Theme.color(for: status.id).opacity(0.6), what: "weekly limit") }
+            }
+            Group {
+                if store.limitsShown == .weekly, weekly != nil, let r = status.secondary?.resetsAt {
+                    Text("wk " + MenuBarGlance.roughly(r.timeIntervalSince(store.now)))
+                } else {
+                    CountdownText(d: d, now: store.now)
+                }
+            }
+            .font(.system(size: 12).monospacedDigit()).foregroundStyle(Theme.dim)
+            .frame(width: 50, alignment: .trailing)
         }
         .padding(.horizontal, 10).padding(.vertical, 8)
         .help(status.source)
@@ -290,6 +305,8 @@ struct MiniProviderRow: View {
 struct HealthDots: View {
     let left: Double?
     let color: Color
+    /// What VoiceOver says the dots are for, when it isn't the 5-hour window.
+    var what: String? = nil
     var body: some View {
         HStack(spacing: 2) {
             ForEach(0..<6, id: \.self) { i in
@@ -298,7 +315,7 @@ struct HealthDots: View {
             }
         }
         .accessibilityElement()
-        .accessibilityLabel(left.map { "\(Int(($0 * 100).rounded())) percent left" } ?? "usage unknown")
+        .accessibilityLabel((what.map { $0 + ", " } ?? "") + (left.map { "\(Int(($0 * 100).rounded())) percent left" } ?? "usage unknown"))
     }
 }
 

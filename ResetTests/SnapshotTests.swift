@@ -65,6 +65,8 @@ final class SnapshotTests: XCTestCase {
             ("pill-running-out", MenuBarGlance(tone: .runningOut, text: "86% · out 9:29")),
             ("pill-ready", MenuBarGlance(tone: .ready, text: "ready")),
             ("pill-signed-out", MenuBarGlance(tone: .normal, text: "2:46", warning: true)),
+            ("pill-both", MenuBarGlance(tone: .normal, text: "2:46 · 42%", detail: "wk 3d · 60%")),
+            ("pill-both-low", MenuBarGlance(tone: .low, text: "1:00 · 90%", detail: "wk 18h · 9%")),
         ]
         for (name, g) in cases {
             let img = try XCTUnwrap(MenuBarPill.image(g))

@@ -50,7 +50,9 @@ final class BudgetTests: XCTestCase {
 
     func testOverAdviceNamesTheDownshiftModelOrSaysStop() {
         let with = Budget(task: "Docs", maxPercent: 50, downshiftModel: "haiku", setAt: now)
-        XCTAssertTrue(with.advice(used: 55).contains("Switch to haiku"))
+        let over = with.advice(used: 55)
+        XCTAssertTrue(over.contains("haiku subagents with a complete brief") && over.contains("/model haiku"),
+                      "Claude can't change its own model, so both ways to switch are spelled out")
         let without = Budget(task: "Docs", maxPercent: 50, downshiftModel: nil, setAt: now)
         XCTAssertTrue(without.advice(used: 55).contains("check in with the user"))
         XCTAssertTrue(without.advice(used: 41).contains("Wrap up"))
@@ -196,7 +198,7 @@ final class MCPServerTests: XCTestCase {
         snapshot = snap(used: 64)
         (report, _) = call("get_claude_usage")
         XCTAssertEqual((report["budget"] as? [String: Any])?["status"] as? String, "over")
-        XCTAssertTrue((report["advice"] as? String)?.contains("Switch to haiku") == true)
+        XCTAssertTrue((report["advice"] as? String)?.contains("/model haiku") == true)
 
         let (cleared, clearErr) = call("clear_budget")
         XCTAssertFalse(clearErr)

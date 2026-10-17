@@ -106,7 +106,10 @@ struct Budget: Codable, Equatable {
             return "Nearing the budget for \(task) (\(pace)). Wrap up: finish the current step and don't start new subtasks."
         case .over:
             if let m = downshiftModel {
-                return "Over the budget for \(task) (\(pace)). Switch to \(m) for the rest of this task, including subagents."
+                // Claude can't change its own model mid-session, so "switch to haiku" left it guessing. Say both
+                // ways: subagents on that model (they start cold, so brief them fully), or the user's /model,
+                // which keeps the conversation.
+                return "Over the budget for \(task) (\(pace)). Do the rest of this task on \(m): give remaining steps to \(m) subagents with a complete brief (they don't see this conversation), or ask the user to run /model \(m) to continue here with full context."
             }
             return "Over the budget for \(task) (\(pace)). Stop at the next safe point and check in with the user before continuing."
         }

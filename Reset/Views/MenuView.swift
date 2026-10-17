@@ -172,9 +172,8 @@ struct MenuView: View {
     // MARK: Numbers
 
     private var stats: some View {
-        let cal = Calendar.current
-        let today = store.usage.calls.filter { cal.isDateInToday($0.time) }.reduce(0) { $0 + $1.cost }
-        let week = store.usage.calls.filter { $0.time >= Date().addingTimeInterval(-7 * 86400) }.reduce(0) { $0 + $1.cost }
+        let today = store.usage.todayCost
+        let week = store.usage.weekCost
         let plan = store.usage.effectivePlan * 7 / 30
         return HStack(spacing: 8) {
             StatChip(value: Dash.money(today), label: "today")

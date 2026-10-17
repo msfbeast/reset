@@ -44,6 +44,9 @@ final class ClaudeUsageScanner {
         var health: FormatHealth?
         /// The account the transcript's session ran under (its credential rows), for per-account costs.
         var org: String?
+        /// Whether all of the file has been searched for `org`. Subagent transcripts have none, and were searched
+        /// again, end to end, on every scan. Optional so caches written before it existed still decode.
+        var orgSearched: Bool?
     }
 
     /// Rows in one transcript that looked like usage but couldn't be read. Claude Code changing how it writes
@@ -96,6 +99,12 @@ final class ClaudeUsageScanner {
         return dir.appendingPathComponent("claude-usage-cache-v2.json")
     }()
     private var loadedDisk = false
+    /// Saving rewrites the whole cache (about 50 MB of JSON for a month of heavy use), and some transcript grows
+    /// between almost every two scans. After a restart, what was appended since the last save is read again from
+    /// the saved offsets, so saving at most hourly loses nothing.
+    private var savedAt = Date.distantPast
+    private var unsaved = false
+    static let saveEvery: TimeInterval = 3600
 
     struct Result {
         var calls: [Call]
@@ -135,9 +144,11 @@ final class ClaudeUsageScanner {
                 // A recent file cached before format checks existed is read once more, so the check covers it.
                 let needsHealth = cache[url.path]?.health == nil && mod > Date().addingTimeInterval(-Self.recentWindow)
                 if var c = cache[url.path], abs(c.mtime.timeIntervalSince(mod)) < 2, c.size == size, !needsHealth {
-                    // Cached before accounts were tracked: a quick text search finds the org, no re-parse needed.
-                    if c.org == nil, let o = TranscriptScanner.lastOrg(url, from: 0, size: size) {
-                        c.org = o; cache[url.path] = c; changed = true
+                    // Cached before accounts were tracked: a quick text search finds the org, once, no re-parse needed.
+                    if c.org == nil, c.orgSearched != true {
+                        c.org = TranscriptScanner.lastOrg(url, from: 0, size: size)
+                        c.orgSearched = true
+                        cache[url.path] = c; changed = true
                     }
                     results.append(c); continue
                 }
@@ -158,11 +169,21 @@ final class ClaudeUsageScanner {
         }
         if changed {
             cache = cache.filter { seen.contains($0.key) }
-            if let d = try? JSONEncoder().encode(cache) { try? d.write(to: cacheURL, options: .atomic) }
+            unsaved = true
         }
+        // A failed save (a full disk, say) is tried again next scan.
+        if Date().timeIntervalSince(savedAt) >= Self.saveEvery { saveIfNeeded() }
         var r = Self.combine(results, since: since)
         r.format = Self.formatReport(results, recentSince: Date().addingTimeInterval(-Self.recentWindow))
         return r
+    }
+
+    /// Writes the cache if anything changed since the last save. Run on the scan queue: hourly from `scan`, and
+    /// when Reset quits, so a quit or an update doesn't make the next launch re-read up to an hour of appends.
+    func saveIfNeeded() {
+        guard unsaved, let d = try? JSONEncoder().encode(cache), (try? d.write(to: cacheURL, options: .atomic)) != nil else { return }
+        savedAt = Date()
+        unsaved = false
     }
 
     // MARK: Format check
@@ -274,6 +295,8 @@ final class ClaudeUsageScanner {
         var out = new
         if var h = old.health, let n = new.health { h.add(n); out.health = h }
         out.org = new.org ?? old.org
+        // Only the new bytes were just searched; the rest counts only if it was searched before.
+        if old.orgSearched != true { out.orgSearched = nil }
         out.calls = Array(byId.values)
         out.titles = old.titles.merging(new.titles) { _, b in b }
         out.limitHits = old.limitHits + new.limitHits
@@ -282,8 +305,9 @@ final class ClaudeUsageScanner {
     }
 
     static func parse(_ url: URL, mtime: Date, size: Int, from start: Int) -> FileResult {
+        // Searched up to `offset` for the org, as nothing past it is read.
         var out = FileResult(mtime: mtime, size: size, calls: [], titles: [:], limitHits: [], apiMillis: [:], offset: start,
-                             health: FormatHealth())
+                             health: FormatHealth(), orgSearched: true)
         guard let all = try? Data(contentsOf: url, options: .mappedIfSafe), all.count > start else { return out }
         // Read up to the size seen on disk, and stop at the last complete line in it;
         // a half-written last line is picked up next time.

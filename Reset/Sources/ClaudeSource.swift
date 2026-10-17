@@ -323,10 +323,18 @@ final class TranscriptScanner {
             // A session runs under one account; its transcript's org applies to all its events.
             out += entry.events.filter { $0.time >= since }.map { var e = $0; e.org = entry.org; return e }
         }
-        // Drop cache entries for files that aged out of every possible lookback.
-        if cache.count > seen.count + 200 { cache = cache.filter { seen.contains($0.key) } }
+        // Drop cache entries for files that aged out of every possible lookback, not every file this call skipped:
+        // a scan asks for a week and then for 10 hours, and keeping only the 10 hours' files made every 60-second
+        // scan parse the whole week of transcripts again.
+        if cache.count > seen.count + 200 {
+            let oldest = Date().addingTimeInterval(-Self.keep)
+            cache = cache.filter { seen.contains($0.key) || $0.value.mtime >= oldest }
+        }
         return out
     }
+
+    /// A day longer than the longest lookback asked for (ClaudeSource's week).
+    static let keep: TimeInterval = 8 * 86400
 
     private static let iso: ISO8601DateFormatter = {
         let f = ISO8601DateFormatter()
@@ -348,42 +356,112 @@ final class TranscriptScanner {
     static func parse(_ url: URL, from start: Int, size: Int) -> ([Event], Int) {
         guard let all = try? Data(contentsOf: url, options: .mappedIfSafe), all.count > start else { return ([], start) }
         let end = min(all.count, max(size, start))
-        guard end > start, let lastNewline = all[start..<end].lastIndex(of: UInt8(ascii: "\n")) else { return ([], start) }
-        let data = all[start...lastNewline]
-        let assistant = Data("\"type\":\"assistant\"".utf8)
-        let quota = Data("\"quotaLimits\"".utf8)
-        let isError = Data("\"isApiErrorMessage\":true".utf8)
-        let requestId = Data("\"requestId\"".utf8)
-        let key = Data("\"timestamp\":\"".utf8)
-        var out: [Event] = []
-        for line in data.split(separator: UInt8(ascii: "\n")) {
-            guard line.range(of: assistant) != nil, let ts = timestamp(line, key: key) else { continue }
-            if line.range(of: quota) != nil {
-                if let obj = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any],
-                   let q = obj["quotaLimits"] as? [String: Any], let r = q["resetsAt"] as? Double,
-                   (q["status"] as? String) == "rejected" {
-                    let at = Date(timeIntervalSince1970: r)
-                    switch q["rateLimitType"] as? String {
-                    case "five_hour": out.append(.init(time: ts, kind: .fiveHourLimit(at)))
-                    case "seven_day", "seven_day_opus", "seven_day_sonnet": out.append(.init(time: ts, kind: .weeklyLimit(at)))
-                    default: break
+        // Straight from the bytes: Data.split and Data.range(of:) spent most of their time on per-byte bookkeeping,
+        // and each launch reads a week of transcripts, gigabytes for someone who uses Claude Code all day.
+        return all.withUnsafeBytes { all -> ([Event], Int) in
+            guard end > start, let lastNewline = all.lastIndex(of: UInt8(ascii: "\n"), in: start..<end) else { return ([], start) }
+            var out: [Event] = []
+            all.forEachLine(in: start..<lastNewline + 1) { line in
+                guard line.find(Marker.assistant) != nil, let ts = timestamp(line) else { return }
+                if line.find(Marker.quota) != nil {
+                    if let obj = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any],
+                       let q = obj["quotaLimits"] as? [String: Any], let r = q["resetsAt"] as? Double,
+                       (q["status"] as? String) == "rejected" {
+                        let at = Date(timeIntervalSince1970: r)
+                        switch q["rateLimitType"] as? String {
+                        case "five_hour": out.append(.init(time: ts, kind: .fiveHourLimit(at)))
+                        case "seven_day", "seven_day_opus", "seven_day_sonnet": out.append(.init(time: ts, kind: .weeklyLimit(at)))
+                        default: break
+                        }
                     }
+                    return
                 }
-                continue
+                // Only real API responses count as usage: error rows, slash-command echoes and synthetic
+                // rows have no requestId or are flagged as API errors.
+                guard line.find(Marker.isError) == nil, line.find(Marker.requestId) != nil else { return }
+                out.append(.init(time: ts, kind: .activity))
             }
-            // Only real API responses count as usage: error rows, slash-command echoes and synthetic
-            // rows have no requestId or are flagged as API errors.
-            guard line.range(of: isError) == nil, line.range(of: requestId) != nil else { continue }
-            out.append(.init(time: ts, kind: .activity))
+            return (out, lastNewline + 1)
         }
-        return (out, lastNewline + 1)
     }
 
-    private static func timestamp(_ line: Data.SubSequence, key: Data) -> Date? {
-        guard let r = line.range(of: key) else { return nil }
-        let start = r.upperBound
-        guard let end = line[start...].firstIndex(of: UInt8(ascii: "\"")),
-              let s = String(data: line[start..<end], encoding: .utf8) else { return nil }
+    private enum Marker {
+        static let assistant = Array("\"type\":\"assistant\"".utf8)
+        static let quota = Array("\"quotaLimits\"".utf8)
+        static let isError = Array("\"isApiErrorMessage\":true".utf8)
+        static let requestId = Array("\"requestId\"".utf8)
+        static let timestamp = Array("\"timestamp\":\"".utf8)
+    }
+
+    private static func timestamp(_ line: UnsafeRawBufferPointer) -> Date? {
+        guard let r = line.find(Marker.timestamp) else { return nil }
+        let start = r + Marker.timestamp.count
+        guard let end = line[start...].firstIndex(of: UInt8(ascii: "\"")) else { return nil }
+        return date(UnsafeRawBufferPointer(rebasing: line[start..<end]))
+    }
+
+    /// Reads "2026-03-02T09:14:05.120Z", the shape Claude Code writes, without ISO8601DateFormatter, which took
+    /// about 40 µs a row, a third of the time spent parsing at launch. Anything else still goes to the formatter.
+    static func date(_ b: UnsafeRawBufferPointer) -> Date? {
+        func number(_ at: Int, _ digits: Int) -> Int? {
+            var v = 0
+            for i in at..<at + digits {
+                guard (48...57).contains(b[i]) else { return nil }
+                v = v * 10 + Int(b[i] - 48)
+            }
+            return v
+        }
+        if b.count == 24, b[4] == UInt8(ascii: "-"), b[7] == UInt8(ascii: "-"), b[10] == UInt8(ascii: "T"),
+           b[13] == UInt8(ascii: ":"), b[16] == UInt8(ascii: ":"), b[19] == UInt8(ascii: "."), b[23] == UInt8(ascii: "Z"),
+           let y = number(0, 4), let mo = number(5, 2), let d = number(8, 2), let h = number(11, 2), let mi = number(14, 2),
+           let s = number(17, 2), let ms = number(20, 3),
+           // Only dates the formatter reads the same way: no earlier calendars, leap seconds or rolled-over days.
+           y >= 2000, (1...12).contains(mo), (1...daysIn(month: mo, year: y)).contains(d), h < 24, mi < 60, s < 60 {
+            let seconds = ((daysSince1970(year: y, month: mo, day: d) * 24 + h) * 60 + mi) * 60 + s
+            return Date(timeIntervalSince1970: Double(seconds * 1000 + ms) / 1000)
+        }
+        guard let s = String(bytes: b, encoding: .utf8) else { return nil }
         return iso.date(from: s)
+    }
+
+    private static func daysIn(month: Int, year: Int) -> Int {
+        let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
+        return [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1]
+    }
+
+    /// Days from 1970-01-01 in the Gregorian calendar (Howard Hinnant's days_from_civil, for years from 2000).
+    private static func daysSince1970(year: Int, month: Int, day: Int) -> Int {
+        let y = month <= 2 ? year - 1 : year
+        let era = y / 400, yearOfEra = y - era * 400
+        let dayOfYear = (153 * (month > 2 ? month - 3 : month + 9) + 2) / 5 + day - 1
+        return era * 146_097 + yearOfEra * 365 + yearOfEra / 4 - yearOfEra / 100 + dayOfYear - 719_468
+    }
+}
+
+fileprivate extension UnsafeRawBufferPointer {
+    /// Each non-empty line in `range`, as `split(separator: "\n")` gives them.
+    func forEachLine(in range: Range<Int>, _ body: (UnsafeRawBufferPointer) -> Void) {
+        guard let base = baseAddress else { return }
+        var lo = range.lowerBound
+        while lo < range.upperBound {
+            let hi = memchr(base + lo, Int32(UInt8(ascii: "\n")), range.upperBound - lo).map { base.distance(to: $0) } ?? range.upperBound
+            if hi > lo { body(UnsafeRawBufferPointer(start: base + lo, count: hi - lo)) }
+            lo = hi + 1
+        }
+    }
+
+    /// Where `marker` first appears in these bytes.
+    func find(_ marker: [UInt8]) -> Int? {
+        guard let base = baseAddress, !marker.isEmpty else { return nil }
+        return marker.withUnsafeBytes { m in memmem(base, count, m.baseAddress, m.count).map { base.distance(to: $0) } }
+    }
+
+    func lastIndex(of byte: UInt8, in range: Range<Int>) -> Int? {
+        var i = range.upperBound - 1
+        while i >= range.lowerBound {
+            if self[i] == byte { return i }
+            i -= 1
+        }
+        return nil
     }
 }

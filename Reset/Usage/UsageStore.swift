@@ -52,11 +52,14 @@ struct SessionSummary: Identifiable {
 }
 
 struct UsageWindow: Identifiable {
-    var id: Date { start }
+    /// Two accounts' windows can start in the same 10 minutes, so the account is part of the id.
+    var id: String { "\(start.timeIntervalSince1970)-\(account)" }
     var start: Date
     var end: Date
     var autoStart: Bool
     var hitLimit: Bool
+    /// The account whose window it is ("" when its sessions never said).
+    var account = ""
 }
 
 @Observable
@@ -67,6 +70,8 @@ final class UsageStore {
     private(set) var calls: [Call] = []
     private(set) var titles: [String: String] = [:]
     private(set) var limitHits: [Date] = []
+    /// Exact 5-hour resets from "limit reached" rows, with their account.
+    private(set) var limitResets: [ClaudeUsageScanner.LimitReset] = []
     private(set) var apiMillis: [String: Int] = [:]
     /// Whether Claude Code's recent logs still read cleanly; Settings warns when they don't.
     private(set) var format = ClaudeUsageScanner.FormatReport()
@@ -163,7 +168,7 @@ final class UsageStore {
             guard let self else { return }
             let r = self.scanner.scan(since: since)
             DispatchQueue.main.async {
-                self.load(calls: r.calls, titles: r.titles, limitHits: r.limitHits, apiMillis: r.apiMillis)
+                self.load(calls: r.calls, titles: r.titles, limitHits: r.limitHits, apiMillis: r.apiMillis, resets: r.resets)
                 self.format = Self.simulatedFormat ?? r.format
                 self.loading = false
                 self.lastScan = Date()
@@ -179,10 +184,12 @@ final class UsageStore {
     }
 
     /// Takes a scan's results (or demo mode's, or a test's).
-    func load(calls: [Call], titles: [String: String] = [:], limitHits: [Date] = [], apiMillis: [String: Int] = [:]) {
+    func load(calls: [Call], titles: [String: String] = [:], limitHits: [Date] = [], apiMillis: [String: Int] = [:],
+              resets: [ClaudeUsageScanner.LimitReset] = []) {
         self.calls = calls
         self.titles = titles
         self.limitHits = limitHits
+        self.limitResets = resets
         self.apiMillis = apiMillis
         inputs += 1
     }
@@ -297,7 +304,38 @@ final class UsageStore {
     var effectivePlan: Double {
         Demo.isOn ? 100 : Self.monthlyPlan(main: planMonthlyUSD, others: otherPlansUSD, accounts: accounts.map(\.id), account: account)
     }
-    var planCostForRange: Double { effectivePlan * rangeDays / 30 }
+    var planCostForRange: Double {
+        guard !Demo.isOn else { return effectivePlan * rangeDays / 30 }
+        let start = range == .all ? Date.distantPast : range.start(now: Date())
+        return memoized("planCost") { planCost(since: start, account: account) }
+    }
+
+    /// What the plans cost from `since` to now: each account's plan from `since` or that account's first response,
+    /// whichever is later, so an account opened last week isn't charged a whole month (or all of history).
+    /// `account` nil means every account, as the menu and widgets count.
+    func planCost(since: Date, account: String?, now: Date = Date()) -> Double {
+        if accounts.count <= 1 {
+            return Self.planCost(prices: [("claude", planMonthlyUSD)], first: firstCall.map { ["claude": $0] } ?? [:], since: since, now: now)
+        }
+        let ids = account.flatMap { a in accounts.contains { $0.id == a } ? [a] : nil } ?? accounts.map(\.id)
+        let prices = ids.map { ($0, Self.monthlyPlan(main: planMonthlyUSD, others: otherPlansUSD, accounts: accounts.map(\.id), account: $0)) }
+        var first: [String: Date] = [:]
+        for id in ids { if let t = Self.scope(calls, accounts: accounts, account: id).first?.time { first[id] = t } }
+        return Self.planCost(prices: prices, first: first, since: since, now: now)
+    }
+
+    static func planCost(prices: [(id: String, price: Double)], first: [String: Date], since: Date, now: Date) -> Double {
+        prices.reduce(0) { sum, p in
+            guard let f = first[p.id] else { return sum }
+            return sum + p.price * max(1 / 24, now.timeIntervalSince(max(since, f)) / 86400) / 30
+        }
+    }
+
+    /// All time with several accounts: each plan from its own account's first response. Spreading every plan back
+    /// to the very first response charged an account added last week as if it had been paid for since July.
+    static func allTimePlanCost(prices: [(id: String, price: Double)], first: [String: Date], now: Date) -> Double {
+        planCost(prices: prices, first: first, since: .distantPast, now: now)
+    }
 
     /// Days the chosen range covers, all time counted from the first response on record.
     var rangeDays: Double { range.days(now: Date(), first: firstCall) }
@@ -320,13 +358,16 @@ final class UsageStore {
         }
     }
 
-    struct Mix { var cacheRead = 0, cacheWrite = 0, output = 0, input = 0
+    /// `input` includes the advisor's tokens (its reads, writes and output, which transcripts only give as one
+    /// total per turn); `advisor` says how many of them that is, so the legend can say so.
+    struct Mix { var cacheRead = 0, cacheWrite = 0, output = 0, input = 0, advisor = 0
         var total: Int { cacheRead + cacheWrite + output + input } }
 
     var tokenMix: Mix {
         memoized("tokenMix") {
             inRange.reduce(into: Mix()) { m, c in
                 m.cacheRead += c.cacheRead; m.cacheWrite += c.cw5 + c.cw1h; m.output += c.output; m.input += c.input + c.advisorTokens
+                m.advisor += c.advisorTokens
             }
         }
     }
@@ -335,6 +376,16 @@ final class UsageStore {
     var heatmap: [[Double]] { memoized("heatmap") { Self.heatmap(Self.recent(calls)) } }
     /// The same for the dashboard's chosen account.
     var scopedHeatmap: [[Double]] { memoized("scopedHeatmap") { Self.heatmap(Self.recent(scoped)) } }
+
+    /// The calls from `since` on, found by binary search: `calls` is in time order (see ClaudeUsageScanner.combine).
+    static func calls(_ calls: [Call], since: Date) -> ArraySlice<Call> {
+        var lo = 0, hi = calls.count
+        while lo < hi {
+            let mid = (lo + hi) / 2
+            if calls[mid].time < since { lo = mid + 1 } else { hi = mid }
+        }
+        return calls[lo...]
+    }
 
     /// The heatmap's window: the last `heatmapDays`.
     static func recent(_ calls: [Call], now: Date = Date()) -> [Call] {
@@ -415,15 +466,36 @@ final class UsageStore {
 
     private func findWindows(days: Int, scoped: Bool) -> [UsageWindow] {
         let since = Calendar.current.startOfDay(for: Date().addingTimeInterval(-Double(days - 1) * 86400))
-        var out: [UsageWindow] = []
-        for c in (scoped ? self.scoped : calls) where c.time >= since.addingTimeInterval(-5 * 3600) {
-            if let last = out.last, c.time < last.end { continue }
-            let start = ClaudeSource.floorTo10(c.time)
-            out.append(UsageWindow(start: start, end: start.addingTimeInterval(5 * 3600), autoStart: c.autoStart, hitLimit: false))
+        let list = scoped ? self.scoped : calls
+        // A scoped view only takes its own account's resets; Team's limit isn't Pro's.
+        let orgs = Set(list.compactMap(\.org))
+        let resets = scoped && account != nil ? limitResets.filter { $0.org.map(orgs.contains) ?? orgs.isEmpty } : limitResets
+        return Self.windows(list, resets: resets, since: since)
+    }
+
+    /// Each account's own chain of 5-hour windows, merged in time order. One chain for every call made a Pro
+    /// session that started inside a Team window vanish into it, though each account has its own limit. Calls
+    /// without an account (subagent transcripts) go with their session's; sessions that never say form one chain.
+    ///
+    /// The chain runs over all of history, not from the start of the period shown: starting it there moved past
+    /// windows as the days rolled on. A "limit reached" row names its window's exact reset, so a window it covers
+    /// is placed from that (the estimate alone was an hour out when the window had been opened outside Claude
+    /// Code), and only that account's window is marked as having hit the limit.
+    static func windows(_ calls: [Call], resets: [ClaudeUsageScanner.LimitReset] = [], since: Date) -> [UsageWindow] {
+        var sessionOrg: [String: String] = [:]
+        for c in calls { if let o = c.org, sessionOrg[c.session] == nil { sessionOrg[c.session] = o } }
+        var exact: [String: [Date]] = [:]
+        for r in resets { exact[r.org ?? "", default: []].append(r.resetsAt) }
+        for k in exact.keys { exact[k] = Array(Set(exact[k]!)).sorted() }
+        var chains: [String: [UsageWindow]] = [:]
+        for c in calls {
+            let key = c.org ?? sessionOrg[c.session] ?? ""
+            if let last = chains[key]?.last, c.time < last.end { continue }
+            let known = exact[key]?.first { $0.addingTimeInterval(-5 * 3600) <= c.time && c.time < $0 }
+            let start = known.map { $0.addingTimeInterval(-5 * 3600) } ?? ClaudeSource.floorTo10(c.time)
+            chains[key, default: []].append(UsageWindow(start: start, end: start.addingTimeInterval(5 * 3600), autoStart: c.autoStart,
+                                                         hitLimit: known != nil, account: key))
         }
-        for h in limitHits {
-            if let i = out.firstIndex(where: { $0.start <= h && h < $0.end }) { out[i].hitLimit = true }
-        }
-        return out.filter { $0.end > since }
+        return chains.values.flatMap { $0 }.filter { $0.end > since }.sorted { $0.start < $1.start }
     }
 }

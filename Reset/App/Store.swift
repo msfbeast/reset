@@ -242,7 +242,7 @@ final class Store {
         if p.autoStart && !wasAuto { auto.armedAt[id] = Date(); auto.kickDue[id] = nil }
         syncAlerts()
         // Cursor only reads while it's on, so read it now rather than at the next scan.
-        if id == "cursor", p.enabled, !wasEnabled { refresh() }
+        if id == "cursor", p.enabled, !wasEnabled { CursorSource.retrySoon(); refresh() }
     }
 
     /// A Cursor reading landed. Shown straight away, since a full scan can take a while, then rescanned so
@@ -373,9 +373,6 @@ final class Store {
                         self.forecast.record(used: u, resetsAt: list[i].resetsAt)
                         self.warnIfRunningOut(list[i])
                     }
-                    if let sec = list[i].secondary {
-                        self.warnIfWeeklyHigh(list[i].name, sec)
-                    }
                 }
                 // Checked again here: the option may have been turned off while this scan ran.
                 if desktopOn, self.liveClaudeEnabled, self.desktopAccountsEnabled {
@@ -391,6 +388,10 @@ final class Store {
                     }
                     self.desktopAccounts = liveCount
                     self.desktopExpired = expired
+                }
+                // Every account's weekly limit, not only the CLI's: here Team has none, and Pro's reached 90% unwarned.
+                for s in list where s.id == "claude" || s.id.hasPrefix("claude-") {
+                    if let sec = s.secondary { self.warnIfWeeklyHigh(s.id, s.name, sec) }
                 }
                 self.statuses = list
                 self.updateActiveClaude(list, configOrg: configOrg, now: t)
@@ -512,7 +513,7 @@ final class Store {
 
     /// API value per day of the current month (index 0 is the 1st). Rows outside the month are skipped,
     /// including future-dated ones from a clock that runs behind the server, which used to index past the end.
-    static func monthBuckets(_ calls: [Call], monthStart: Date, daysInMonth: Int, calendar cal: Calendar) -> [Double] {
+    static func monthBuckets<C: Collection<Call>>(_ calls: C, monthStart: Date, daysInMonth: Int, calendar cal: Calendar) -> [Double] {
         var days = Array(repeating: 0.0, count: max(0, daysInMonth))
         for c in calls where c.time >= monthStart {
             guard let i = cal.dateComponents([.day], from: monthStart, to: c.time).day, i >= 0, i < days.count else { continue }
@@ -540,7 +541,7 @@ final class Store {
             s += " · \(Fmt.countdown(end.timeIntervalSince(Date()))) to \(Fmt.clock.string(from: end))"
             parts.append(s)
         }
-        if let b = c.blockedUntil, b > Date() { parts.append("weekly limit until \(Fmt.when(b))") }
+        if let b = c.blockedUntil, b > Date() { parts.append("weekly limit until \(c.blockedEstimate ? "about " : "")\(Fmt.when(b))") }
         else if let sec = c.secondary, sec.isHigh, let u = sec.usedPercent { parts.append("wk \(Int(u.rounded()))%") }
         if let out = runsOut { parts.append("runs out ~\(Fmt.clock.string(from: out))") }
         if let b = budget { parts.append(b.tag(used: budgetUsed)) }
@@ -596,6 +597,13 @@ final class Store {
         out["usageByAccount"] = Dictionary(uniqueKeysWithValues: usage.accounts.map { a in
             (a.name, (UsageStore.scope(usage.calls, accounts: usage.accounts, account: a.id).filter { $0.time >= month }.reduce(0) { $0 + $1.cost } * 100).rounded() / 100)
         })
+        // All time per account, and the first response each one has, to check attribution against the transcripts.
+        out["usageByAccountAllTime"] = Dictionary(uniqueKeysWithValues: usage.accounts.map { a in
+            let mine = UsageStore.scope(usage.calls, accounts: usage.accounts, account: a.id)
+            return (a.name, ["cost": (mine.reduce(0) { $0 + $1.cost } * 100).rounded() / 100, "responses": mine.count,
+                             "first": d(mine.first?.time)] as [String: Any])
+        })
+        out["usageAllTime"] = ["cost": (usage.calls.reduce(0) { $0 + $1.cost } * 100).rounded() / 100, "responses": usage.calls.count]
         let hits = liveClaude.limitHits
         let dayAgo = Date().addingTimeInterval(-86400)
         out["livePolling"] = ["lastClaudeActivity": d(lastUse), "intervalSeconds": LiveClaude.interval(lastActivity: lastUse),
@@ -780,16 +788,18 @@ final class Store {
 
     /// Once per weekly cycle, when the weekly limit passes 80%: by the time it's used up, a fresh 5-hour window
     /// no longer helps, and that was the first anyone heard of it.
-    private func warnIfWeeklyHigh(_ name: String, _ sec: WindowStatus.Secondary) {
+    private func warnIfWeeklyHigh(_ id: String, _ name: String, _ sec: WindowStatus.Secondary) {
         guard sec.isHigh, (sec.usedPercent ?? 0) < 100, sec.resetsAt > Date() else { return }
         let key = Alerts.minuteKey(sec.resetsAt)
-        // The reset time wobbles a little between readings; within an hour is the same cycle.
-        let warned = UserDefaults.standard.integer(forKey: "weeklyWarnedFor")
+        // The reset time wobbles a little between readings; within an hour is the same cycle. One record per
+        // account, so one account's warning doesn't silence another's.
+        let defaultsKey = id == "claude" ? "weeklyWarnedFor" : "weeklyWarnedFor." + id
+        let warned = UserDefaults.standard.integer(forKey: defaultsKey)
         guard abs(warned - key) > 60 else { return }
-        UserDefaults.standard.set(key, forKey: "weeklyWarnedFor")
+        UserDefaults.standard.set(key, forKey: defaultsKey)
         let title = "\(name): weekly limit \(Int((sec.usedPercent ?? 0).rounded()))% used"
         let body = "It resets \(Fmt.when(sec.resetsAt)). Once it's used up, new 5-hour windows won't help until then."
-        alerts.notifyNow(title: title, body: body, id: "weekly")
+        alerts.notifyNow(title: title, body: body, id: "weekly-" + id)
         if phoneEnabled { alerts.pushNow(title: title, body: body, server: ntfyServer, topic: ntfyTopic, log: note) }
         note("Weekly limit at \(Int((sec.usedPercent ?? 0).rounded()))%")
     }
@@ -804,10 +814,15 @@ final class Store {
     /// Writes what the desktop widgets show and asks WidgetKit to redraw, only when something changed.
     func writeWidgetSnapshot() {
         guard !Demo.isOn else { return }
-        let week = usage.calls.filter { $0.time >= Date().addingTimeInterval(-7 * 86400) }
+        // Nothing here looks back more than a month, and since "All" means all time, every call on record is a lot to
+        // walk on the main thread each minute; calls are in time order, so the month is found by binary search.
+        let monthStartForSlice = Calendar.current.date(from: Calendar.current.dateComponents([.year, .month], from: Date()))!
+        let recent = UsageStore.calls(usage.calls, since: min(Date().addingTimeInterval(-31 * 86400), monthStartForSlice))
+        let week = recent.filter { $0.time >= Date().addingTimeInterval(-7 * 86400) }
         let weekCost = week.reduce(0) { $0 + $1.cost }
         let cr = week.reduce(0) { $0 + $1.cacheRead }, rest = week.reduce(0) { $0 + $1.input + $1.cw5 + $1.cw1h }
-        let plan = usage.totalPlanMonthly * 7 / 30
+        // Each account's plan from its own first response, as the dashboard counts it.
+        let plan = usage.planCost(since: Date().addingTimeInterval(-7 * 86400), account: nil)
         func provider(_ s: WindowStatus) -> WidgetSnapshot.Provider {
             var available = true
             if case .unavailable = s.state { available = false }
@@ -817,7 +832,7 @@ final class Store {
                          usageAsOf: usageReadAt(s), liveFailingSince: s.id == "claude" && liveClaudeEnabled ? liveClaude.failingSince : desktopReading(for: s)?.failingSince,
                          liveProblem: s.id == "claude" && liveClaudeEnabled ? liveProblemText : desktopReading(for: s).flatMap { l in
                              if case .problem(let why) = l.state { return why } else { return nil } },
-                         org: s.account)
+                         org: s.account, blockedEstimate: s.blockedEstimate ? true : nil)
         }
         let providers = visible.filter { MascotArt.providers.contains($0.id) }.map(provider)
         // 7 days: the week widget counts this week's windows from these (5 undercounted it); the barcode draws its own 5 rows.
@@ -825,11 +840,12 @@ final class Store {
         var snap = WidgetSnapshot(updated: .distantPast, look: look, providers: providers, windows: windows, weekCost: weekCost,
                                   weekMultiple: plan > 0 ? weekCost / plan : nil,
                                   cacheHit: cr + rest > 0 ? Double(cr) / Double(cr + rest) : 0)
-        let month = usage.calls.filter { $0.time >= Date().addingTimeInterval(-30 * 86400) }
+        let month = recent.filter { $0.time >= Date().addingTimeInterval(-30 * 86400) }
         let monthCost = month.reduce(0) { $0 + $1.cost }
         snap.monthCost = monthCost
         snap.claudeAccounts = statuses.filter { $0.id == "claude" || $0.id.hasPrefix("claude-") }.map(provider)
-        snap.monthMultiple = usage.totalPlanMonthly > 0 ? monthCost / usage.totalPlanMonthly : nil
+        let monthPlan = usage.planCost(since: Date().addingTimeInterval(-30 * 86400), account: nil)
+        snap.monthMultiple = monthPlan > 0 ? monthCost / monthPlan : nil
         snap.monthCacheSaved = month.reduce(0) { acc, c in
             guard let p = Pricing.claude(c.model) else { return acc }
             return acc + Double(c.cacheRead) * (p.input - p.cacheRead) / 1_000_000
@@ -842,7 +858,7 @@ final class Store {
         snap.heatmap = gmax > 0 ? grid.map { $0.map { ($0 / gmax * 100).rounded() / 100 } } : grid
         var hours = Array(repeating: 0.0, count: 24)
         let cal = Calendar.current
-        for c in usage.calls where cal.isDateInToday(c.time) { hours[cal.component(.hour, from: c.time)] += Double(c.output) }
+        for c in recent where cal.isDateInToday(c.time) { hours[cal.component(.hour, from: c.time)] += Double(c.output) }
         let hmax = hours.max() ?? 0
         snap.today = hours.map { hmax > 0 ? ($0 / hmax * 100).rounded() / 100 : 0 }
 
@@ -855,7 +871,7 @@ final class Store {
         var names: [String: String] = [:]
         let monthStart = cal.date(from: cal.dateComponents([.year, .month], from: Date()))!
         let daysInMonth = cal.range(of: .day, in: .month, for: Date())?.count ?? 30
-        for c in usage.calls {
+        for c in recent {
             let d = cal.dateComponents([.day], from: cal.startOfDay(for: c.time), to: today0).day ?? 99
             if d >= 0 && d < 14 { daily[13 - d] += c.cost }
             if d == 0 { hourT[cal.component(.hour, from: c.time)] += c.cost }
@@ -870,7 +886,7 @@ final class Store {
         snap.todayCumulative = cumulative(hourT)
         snap.yesterdayCumulative = cumulative(hourY)
         snap.projects = proj.sorted { $0.value > $1.value }.prefix(6).map { .init(name: $0.key, cost: ($0.value * 100).rounded() / 100) }
-        let mdays = Self.monthBuckets(usage.calls, monthStart: monthStart, daysInMonth: daysInMonth, calendar: cal)
+        let mdays = Self.monthBuckets(recent, monthStart: monthStart, daysInMonth: daysInMonth, calendar: cal)
         snap.monthDays = mdays.map { ($0 * 100).rounded() / 100 }
         snap.claudeRunsOutAt = runsOut
         snap.startingAt = widgetStarting["claude"]

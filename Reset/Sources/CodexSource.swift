@@ -64,6 +64,8 @@ struct CodexSource: WindowSource {
     }
 
     /// The last `rate_limits` object written in the most recently modified session log that has one.
+    /// Every rescan used to read up to 20 whole session files; now an unchanged newest log reuses the last answer,
+    /// and each log is searched from its end, where the latest limits are, only reading all of it if need be.
     static func latestRateLimits(under root: URL) -> [String: Any]? {
         let fm = FileManager.default
         guard let e = fm.enumerator(at: root, includingPropertiesForKeys: [.contentModificationDateKey],
@@ -74,15 +76,47 @@ struct CodexSource: WindowSource {
             files.append((url, mod ?? .distantPast))
         }
         files.sort { $0.1 > $1.1 }
-        let marker = Data("\"rate_limits\":{".utf8)
+        guard let newest = files.first else { return nil }
+        cacheLock.lock()
+        if let c = cached, c.url == newest.0, c.mtime == newest.1 { cacheLock.unlock(); return c.limits }
+        cacheLock.unlock()
+        var found: [String: Any]?
         for (url, _) in files.prefix(20) {
-            guard let data = try? Data(contentsOf: url, options: .mappedIfSafe) else { continue }
-            for line in data.split(separator: UInt8(ascii: "\n")).reversed() where line.range(of: marker) != nil {
-                if let obj = try? JSONSerialization.jsonObject(with: Data(line)),
-                   let rl = find("rate_limits", in: obj) as? [String: Any],
-                   rl["primary"] is [String: Any] {
-                    return rl
-                }
+            if let rl = lastRateLimits(in: url) { found = rl; break }
+        }
+        cacheLock.lock(); cached = (newest.0, newest.1, found); cacheLock.unlock()
+        return found
+    }
+
+    private static let cacheLock = NSLock()
+    private static var cached: (url: URL, mtime: Date, limits: [String: Any]?)?
+
+    /// How much of a log's end is searched first.
+    static let tailBytes = 512 * 1024
+
+    /// The last `rate_limits` in one log: its last `tailBytes` first, then the whole file if they had none.
+    static func lastRateLimits(in url: URL) -> [String: Any]? {
+        guard let h = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? h.close() }
+        let size = (try? h.seekToEnd()) ?? 0
+        let from = size > UInt64(tailBytes) ? size - UInt64(tailBytes) : 0
+        try? h.seek(toOffset: from)
+        if let tail = try? h.readToEnd(), let rl = lastRateLimits(tail, partialFirstLine: from > 0) { return rl }
+        guard from > 0 else { return nil }
+        try? h.seek(toOffset: 0)
+        return (try? h.readToEnd()).flatMap { lastRateLimits($0, partialFirstLine: false) }
+    }
+
+    /// Searches lines from the end. A tail usually starts mid-line, so its first piece is skipped.
+    static func lastRateLimits(_ data: Data, partialFirstLine: Bool) -> [String: Any]? {
+        let marker = Data("\"rate_limits\":{".utf8)
+        var lines = data.split(separator: UInt8(ascii: "\n"))
+        if partialFirstLine, !lines.isEmpty { lines.removeFirst() }
+        for line in lines.reversed() where line.range(of: marker) != nil {
+            if let obj = try? JSONSerialization.jsonObject(with: Data(line)),
+               let rl = find("rate_limits", in: obj) as? [String: Any],
+               rl["primary"] is [String: Any] {
+                return rl
             }
         }
         return nil

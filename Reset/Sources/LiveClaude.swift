@@ -75,8 +75,10 @@ final class LiveClaude {
     }
 
     /// Whether a fetch is due: the interval has passed since the last attempt, and any back-off is over.
-    static func shouldFetch(now: Date, lastAttempt: Date, backoffUntil: Date, interval: TimeInterval) -> Bool {
-        now.timeIntervalSince(lastAttempt) >= interval && now >= backoffUntil
+    /// Never while one is still running: a Keychain prompt nobody answers, or a slow network, used to let every
+    /// later poll start another fetch beside it.
+    static func shouldFetch(now: Date, lastAttempt: Date, backoffUntil: Date, interval: TimeInterval, inFlight: Bool = false) -> Bool {
+        !inFlight && now.timeIntervalSince(lastAttempt) >= interval && now >= backoffUntil
     }
 
     enum State: Equatable {
@@ -96,6 +98,8 @@ final class LiveClaude {
     private(set) var failingSince: Date?
     private var lastAttempt = Date.distantPast
     private var backoffUntil = Date.distantPast
+    /// A fetch has started and not finished (see `shouldFetch`).
+    private var inFlight = false
     private let lock = NSLock()
     private let scheduleURL: URL?
     let source: Source
@@ -144,8 +148,10 @@ final class LiveClaude {
             lastAttempt = max(lastAttempt, disk.lastAttempt)
             backoffUntil = max(backoffUntil, disk.backoffUntil)
         }
-        guard Self.shouldFetch(now: now, lastAttempt: lastAttempt, backoffUntil: backoffUntil, interval: interval) else { lock.unlock(); return }
+        guard Self.shouldFetch(now: now, lastAttempt: lastAttempt, backoffUntil: backoffUntil, interval: interval, inFlight: inFlight)
+        else { lock.unlock(); return }
         lastAttempt = now
+        inFlight = true
         lock.unlock()
         persist { $0.lastAttempt = now }
         if snapshot == nil { state = .loading }
@@ -249,6 +255,7 @@ final class LiveClaude {
             if self.source == .claudeCode, let d = try? JSONSerialization.data(withJSONObject: diag, options: [.prettyPrinted, .sortedKeys]) {
                 try? d.write(to: WidgetSnapshot.url.deletingLastPathComponent().appendingPathComponent("live-usage.json"))
             }
+            self.lock.lock(); self.inFlight = false; self.lock.unlock()
             DispatchQueue.main.async {
                 self.needsSignIn = false
                 self.failingSince = nil
@@ -286,10 +293,13 @@ final class LiveClaude {
     }
 
     private func finish(_ s: State, _ done: @escaping () -> Void) {
-        if case .problem(let why) = s {
+        lock.lock(); inFlight = false; lock.unlock()
+        // Read by the menu on the main thread, so it's only ever written there.
+        let signIn: Bool? = {
+            guard case .problem(let why) = s else { return nil }
             let w = why.lowercased()
-            needsSignIn = w.contains("sign-in") || w.contains("signed in") || w.contains("didn't accept")
-        }
+            return w.contains("sign-in") || w.contains("signed in") || w.contains("didn't accept")
+        }()
         if case .problem(let why) = s, source == .claudeCode {
             let diag: [String: Any] = ["fetched": ISO8601DateFormatter().string(from: Date()), "problem": why]
             if let d = try? JSONSerialization.data(withJSONObject: diag, options: .prettyPrinted) {
@@ -297,6 +307,7 @@ final class LiveClaude {
             }
         }
         DispatchQueue.main.async {
+            if let signIn { self.needsSignIn = signIn }
             self.state = s
             if case .problem = s { self.failingSince = self.failingSince ?? Date() }
             done()
@@ -311,24 +322,23 @@ final class LiveClaude {
     static func window(_ v: Any?) -> Window? {
         guard let d = v as? [String: Any], let u = d["utilization"] as? Double else { return nil }
         let r = (d["resets_at"] as? String).flatMap { isoFrac.date(from: $0) ?? iso.date(from: $0) }
-        return Window(percent: u, resetsAt: r)
+        return Window(percent: u, resetsAt: r.map(roundedToMinute))
+    }
+
+    /// Anthropic's reset times sit a fraction of a second either side of the minute (19:09:59.68 for 19:10), and
+    /// clock formatting cuts seconds off, so some resets showed a minute early.
+    static func roundedToMinute(_ d: Date) -> Date {
+        Date(timeIntervalSinceReferenceDate: (d.timeIntervalSinceReferenceDate / 60).rounded() * 60)
     }
 
     struct Token { var access: String; var expiresAt: Date? }
 
     /// Uses /usr/bin/security, the same tool Claude Code writes the item with.
     static func readToken() -> Token? {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/security")
-        p.arguments = ["find-generic-password", "-s", "Claude Code-credentials", "-w"]
-        let out = Pipe()
-        p.standardOutput = out
-        p.standardError = FileHandle.nullDevice
-        do { try p.run() } catch { return nil }
-        let data = out.fileHandleForReading.readDataToEndOfFile()
-        p.waitUntilExit()
-        guard p.terminationStatus == 0,
-              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+        // macOS can stop to ask about Keychain access; nobody answering mustn't hold a fetch open forever.
+        guard let data = run("/usr/bin/security", ["find-generic-password", "-s", "Claude Code-credentials", "-w"], timeout: 30)
+        else { return nil }
+        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let oauth = obj["claudeAiOauth"] as? [String: Any],
               let access = oauth["accessToken"] as? String else { return nil }
         let exp = (oauth["expiresAt"] as? Double).map { Date(timeIntervalSince1970: $0 / 1000) }
@@ -343,6 +353,25 @@ final class LiveClaude {
         req.setValue("application/json", forHTTPHeaderField: "Accept")
         req.setValue("claude-cli/2.1 (external, cli)", forHTTPHeaderField: "User-Agent")
         return req
+    }
+
+    /// Runs a tool and returns what it printed, or nil if it failed or took longer than `timeout` (then it's stopped).
+    static func run(_ path: String, _ args: [String], timeout: TimeInterval) -> Data? {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: path)
+        p.arguments = args
+        let out = Pipe()
+        p.standardOutput = out
+        p.standardError = FileHandle.nullDevice
+        p.standardInput = FileHandle.nullDevice
+        do { try p.run() } catch { return nil }
+        let stop = DispatchWorkItem { if p.isRunning { p.terminate() } }
+        DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: stop)
+        let data = out.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        stop.cancel()
+        // Stopped by the timeout, it ends on a signal rather than exiting.
+        return p.terminationReason == .exit && p.terminationStatus == 0 ? data : nil
     }
 
     /// Overlays live numbers on the transcript-based status.
@@ -364,6 +393,7 @@ final class LiveClaude {
             if let r = sd.resetsAt, r > now {
                 s.secondary = .init(label: "Weekly", resetsAt: r, usedPercent: sd.percent)
                 s.blockedUntil = sd.percent >= 100 ? r : nil
+                s.blockedEstimate = false
             } else {
                 s.blockedUntil = nil
             }

@@ -96,8 +96,9 @@ struct MenuBarGlance: Equatable {
                                 signedOut: Bool, now: Date) -> MenuBarGlance? {
         // A weekly limit outranks everything: no countdown or "ready" would be true until it lifts.
         if let b = blocked, let until = b.blockedUntil, until > now {
-            return MenuBarGlance(tone: .blocked, text: prefix(b) + Fmt.when(until, now: now),
-                                 spoken: "\(spokenName(b)): weekly limit used up until \(Fmt.when(until, now: now))")
+            // A lift time worked out from history is the latest it can be, so it reads "~Fri 9:00" and "about".
+            return MenuBarGlance(tone: .blocked, text: prefix(b) + (b.blockedEstimate ? "~" : "") + Fmt.when(until, now: now),
+                                 spoken: "\(spokenName(b)): weekly limit used up until \(b.blockedEstimate ? "about " : "")\(Fmt.when(until, now: now))")
         }
         if let r = ready {
             return MenuBarGlance(tone: .ready, text: prefix(r) + "ready", spoken: "\(spokenName(r)): a fresh window is ready")

@@ -66,6 +66,15 @@ struct CursorSource: WindowSource {
     private static var fetching = false
     /// Fetches in a row that failed or found the month already over, for backing off.
     private static var misses = 0
+    /// Which sign-in the last fetch used (a hash, not the token), to notice a new one while backing off.
+    private static var failedSignIn: Int?
+
+    static func signInKey(_ token: String?) -> Int? { token.map { $0.hashValue } }
+
+    /// Switching Cursor on asks straight away, whatever the backoff was.
+    static func retrySoon() {
+        lock.lock(); misses = 0; last = nil; lock.unlock()
+    }
 
     /// The latest reading (nil before the first), starting a fetch in the background once one is due. Never waits
     /// for the network, so a slow connection can't hold up the scan that every other tool's countdown waits on.
@@ -73,11 +82,17 @@ struct CursorSource: WindowSource {
         lock.lock(); defer { lock.unlock() }
         let previous = last
         let result = previous.map { shown($0.result, lastGood: lastGood, now: now) }
-        guard !fetching, isDue(previous, misses: misses, now: now) else { return result }
+        // Waiting out a lasting problem: a different sign-in on disk (signed in again in Cursor) is worth a try now.
+        // It's a local read, and only made while waiting.
+        let lasting = previous.flatMap { previousProblem($0.result) }?.lasting ?? false
+        let changed = lasting && signInKey(readSignIn()?.token) != failedSignIn
+        guard !fetching, isDue(previous, misses: misses, now: now, signInChanged: changed) else { return result }
         fetching = true
         DispatchQueue.global(qos: .utility).async {
+            let used = signInKey(readSignIn()?.token)
             fetch(now: now) { result in
                 lock.lock()
+                failedSignIn = used
                 if case .success(let r) = result { lastGood = r }
                 let good = (try? result.get()).map { $0.resetsAt.map { $0 > Date() } ?? true } ?? false
                 misses = good ? 0 : misses + 1
@@ -98,8 +113,10 @@ struct CursorSource: WindowSource {
     }
 
     /// A good reading is asked again after five minutes. A failure, or a month that has ended, after `retryDelay`.
-    static func isDue(_ previous: (attempt: Date, result: Result<Reading, Problem>)?, misses: Int = 0, now: Date) -> Bool {
+    static func isDue(_ previous: (attempt: Date, result: Result<Reading, Problem>)?, misses: Int = 0, now: Date,
+                      signInChanged: Bool = false) -> Bool {
         guard let previous else { return true }
+        if signInChanged, previousProblem(previous.result)?.lasting == true { return true }
         let reading = try? previous.result.get()
         let soon = reading == nil || reading?.resetsAt.map { $0 <= now } == true
         let lasting = previousProblem(previous.result)?.lasting ?? false

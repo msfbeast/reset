@@ -24,6 +24,8 @@ struct WidgetSnapshot: Codable {
         var liveProblem: String? = nil
         /// For Claude entries, the organization (account) they're for. Optional for old snapshots.
         var org: String? = nil
+        /// `blockedUntil` is a guess (the latest the weekly limit can lift), so it's shown as "about".
+        var blockedEstimate: Bool? = nil
     }
     struct Window: Codable {
         var start: Date

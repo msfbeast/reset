@@ -53,6 +53,18 @@ final class CursorTests: XCTestCase {
         XCTAssertLessThanOrEqual(86400 / CursorSource.retryDelay(misses: 5, lasting: true), 12)
     }
 
+    /// Signing in to Cursor again ends the wait, instead of leaving Cursor broken for up to 2 hours.
+    func testANewSignInIsTriedStraightAway() {
+        let refused: Result<CursorSource.Reading, CursorSource.Problem> = .failure(.init(message: "HTTP 401", lasting: true))
+        let blip: Result<CursorSource.Reading, CursorSource.Problem> = .failure(.init(message: "offline"))
+        XCTAssertTrue(CursorSource.isDue((now.addingTimeInterval(-120), refused), misses: 3, now: now, signInChanged: true))
+        XCTAssertFalse(CursorSource.isDue((now.addingTimeInterval(-120), refused), misses: 3, now: now, signInChanged: false))
+        XCTAssertFalse(CursorSource.isDue((now.addingTimeInterval(-30), blip), misses: 1, now: now, signInChanged: true),
+                       "a blip keeps its own short schedule")
+        XCTAssertNotEqual(CursorSource.signInKey("a"), CursorSource.signInKey("b"))
+        XCTAssertNil(CursorSource.signInKey(nil))
+    }
+
     func testABlipShowsTheLastGoodReadingForAWhile() {
         let good = CursorSource.Reading(percent: 40, resetsAt: now.addingTimeInterval(86400), plan: nil, fetchedAt: now)
         let failed: Result<CursorSource.Reading, CursorSource.Problem> = .failure(.init(message: "offline"))

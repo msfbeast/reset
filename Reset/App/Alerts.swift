@@ -40,7 +40,7 @@ final class Alerts {
             // The auto-start mark is part of the id, so switching auto-start replaces the queued wording.
             let id = "\(prefix)\(w.id)-\(Self.minuteKey(at))\(auto ? "-auto" : "")"
             // "Send a message to start it" was wrong when auto-start was about to do exactly that.
-            let body = w.blockedUntil.map { "Session window is fresh, but the \(w.secondary?.label.lowercased() ?? "longer") limit lasts until \(Fmt.when($0))." }
+            let body = w.blockedUntil.map { "Session window is fresh, but the \(w.secondary?.label.lowercased() ?? "longer") limit lasts until \(w.blockedEstimate ? "about " : "")\(Fmt.when($0))." }
                 ?? (w.id == "cursor" ? "A new month of usage has started." // a billing month, not a window to start
                     : auto ? "A fresh window is ready. Auto-start will open it in a couple of minutes."
                     : "A fresh window is ready. Send a message to start it.")

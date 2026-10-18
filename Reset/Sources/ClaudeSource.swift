@@ -198,6 +198,7 @@ struct ClaudeSource: WindowSource {
                (status.lastActivity ?? .distantPast) <= hit.stillAt {
                 status.secondary = .init(label: "Weekly limit hit", resetsAt: hit.liftsBy, usedPercent: 100)
                 status.blockedUntil = hit.liftsBy
+                status.blockedEstimate = true
                 status.source += " · weekly limit hit \(Fmt.when(hit.at, now: now)), lifts by about \(Fmt.when(hit.liftsBy, now: now))"
             }
         }
@@ -271,6 +272,20 @@ struct ClaudeSource: WindowSource {
 /// samples of the 5-hour (`fh`) and 7-day (`sd`) usage percentage per organization.
 enum PlanUsageLog {
     struct Sample { var time: Date; var fiveHour: Double; var sevenDay: Double? }
+
+    /// Every account's readings, oldest first, keyed by organization (lower-cased).
+    static func history(url: URL = PlanUsageLog.url) -> [String: [Sample]] {
+        guard let data = try? Data(contentsOf: url),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let rows = obj["samples"] as? [[String: Any]] else { return [:] }
+        var out: [String: [Sample]] = [:]
+        for s in rows {
+            guard let org = (s["org"] as? String)?.lowercased(), let t = s["t"] as? Double, let u = s["u"] as? [String: Any],
+                  let fh = u["fh"] as? Double else { continue }
+            out[org, default: []].append(Sample(time: Date(timeIntervalSince1970: t / 1000), fiveHour: fh, sevenDay: u["sd"] as? Double))
+        }
+        return out.mapValues { $0.sorted { $0.time < $1.time } }
+    }
 
     static let url = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent("Library/Application Support/Claude/plan-usage-history.json")
@@ -397,7 +412,15 @@ final class TranscriptScanner {
         return all.withUnsafeBytes { all -> ([Event], Int) in
             guard end > start, let lastNewline = all.lastIndex(of: UInt8(ascii: "\n"), in: start..<end) else { return ([], start) }
             var out: [Event] = []
+            var prompts: [Date] = [], answered: [Date] = []
             all.forEachLine(in: start..<lastNewline + 1) { line in
+                // A typed prompt: the window starts when it's sent, not when Claude's reply begins, which can be a
+                // minute later and on the other side of a 10-minute mark. Tool results and meta rows aren't prompts.
+                if line.find(Marker.user) != nil, line.find(Marker.toolResult) == nil, line.find(Marker.isMeta) == nil,
+                   line.find(Marker.localCommand) == nil, let ts = timestamp(line) {
+                    prompts.append(ts)
+                    return
+                }
                 guard line.find(Marker.assistant) != nil, let ts = timestamp(line) else { return }
                 if line.find(Marker.quota) != nil {
                     if let obj = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any],
@@ -416,13 +439,23 @@ final class TranscriptScanner {
                 // rows have no requestId or are flagged as API errors.
                 guard line.find(Marker.isError) == nil, line.find(Marker.requestId) != nil else { return }
                 out.append(.init(time: ts, kind: .activity))
+                answered.append(ts)
             }
+            // Only prompts Claude answered within 10 minutes: one that failed (offline, signed out) opened nothing.
+            for p in prompts where answered.contains(where: { $0 >= p && $0.timeIntervalSince(p) <= 600 }) {
+                out.append(.init(time: p, kind: .activity))
+            }
+            out.sort { $0.time < $1.time }
             return (out, lastNewline + 1)
         }
     }
 
     private enum Marker {
         static let assistant = Array("\"type\":\"assistant\"".utf8)
+        static let user = Array("\"type\":\"user\"".utf8)
+        static let toolResult = Array("\"tool_result\"".utf8)
+        static let isMeta = Array("\"isMeta\":true".utf8)
+        static let localCommand = Array("<local-command".utf8)
         static let quota = Array("\"quotaLimits\"".utf8)
         static let isError = Array("\"isApiErrorMessage\":true".utf8)
         static let requestId = Array("\"requestId\"".utf8)
@@ -499,5 +532,44 @@ fileprivate extension UnsafeRawBufferPointer {
             i -= 1
         }
         return nil
+    }
+}
+
+/// Which account a transcript with no account recorded belongs to. Claude Code only started writing the
+/// organization into transcripts in early October 2026; older sessions all landed on the signed-in account, which
+/// put months of Pro use on a Team account opened in October. The Claude desktop app logs each account's 5-hour
+/// usage over time, so a response is a vote for whichever single account's usage rose within 3 hours after it.
+enum AccountGuess {
+    /// The account most votes point to, when there's enough evidence (at least 3 votes and 3 in 4 agreeing);
+    /// nil otherwise, and the file stays with the signed-in account as before.
+    static func org(times: [Date], history: [String: [PlanUsageLog.Sample]]) -> String? {
+        guard !history.isEmpty, !times.isEmpty else { return nil }
+        var votes: [String: Int] = [:]
+        for t in times {
+            let rising = history.filter { rose($0.value, after: t) }.map(\.key)
+            if rising.count == 1 { votes[rising[0], default: 0] += 1 }
+        }
+        let total = votes.values.reduce(0, +)
+        guard let best = votes.max(by: { $0.value < $1.value }), best.value >= 3, Double(best.value) >= 0.75 * Double(total) else { return nil }
+        return best.key
+    }
+
+    /// The account a desktop-app session belonged to, when only one account had appeared in the desktop app by the
+    /// session's last response. `desktopFirst`: when each account first shows up there.
+    static func desktopAccount(times: [Date], desktopFirst: [String: Date]) -> String? {
+        guard let last = times.max() else { return nil }
+        let there = desktopFirst.filter { $0.value <= last }.map(\.key)
+        return there.count == 1 ? there[0] : nil
+    }
+
+    /// Whether a reading within 3 hours after `t` shows the 5-hour usage higher than the reading before it.
+    static func rose(_ samples: [PlanUsageLog.Sample], after t: Date) -> Bool {
+        guard let i = samples.firstIndex(where: { $0.time > t }), i > 0 else { return false }
+        var j = i
+        while j < samples.count, samples[j].time.timeIntervalSince(t) <= 3 * 3600 {
+            if samples[j].fiveHour > samples[j - 1].fiveHour { return true }
+            j += 1
+        }
+        return false
     }
 }

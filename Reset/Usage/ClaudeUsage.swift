@@ -47,6 +47,19 @@ final class ClaudeUsageScanner {
         /// Whether all of the file has been searched for `org`. Subagent transcripts have none, and were searched
         /// again, end to end, on every scan. Optional so caches written before it existed still decode.
         var orgSearched: Bool?
+        /// Where the session ran ("cli", "claude-desktop" for the desktop app's Code tab). For sessions with no
+        /// account recorded, the desktop app's own records then say which account it was.
+        var entrypoint: String?
+        /// Claude Code's "limit reached" rows: when each was seen and the exact reset it named. Optional so older
+        /// caches decode.
+        var resets: [LimitReset]?
+    }
+
+    /// An exact 5-hour reset from a "limit reached" row, and the account it was for (stamped when combining).
+    struct LimitReset: Codable, Equatable {
+        var seen: Date
+        var resetsAt: Date
+        var org: String? = nil
     }
 
     /// Rows in one transcript that looked like usage but couldn't be read. Claude Code changing how it writes
@@ -96,7 +109,12 @@ final class ClaudeUsageScanner {
     private let cacheURL: URL = {
         let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Reset", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir.appendingPathComponent("claude-usage-cache-v2.json")
+        // v3: cache writes on multi-iteration responses are counted in full; cached numbers from v2 would keep the gap.
+        try? FileManager.default.removeItem(at: dir.appendingPathComponent("claude-usage-cache-v2.json"))
+        try? FileManager.default.removeItem(at: dir.appendingPathComponent("claude-usage-cache-v3.json"))
+        try? FileManager.default.removeItem(at: dir.appendingPathComponent("claude-usage-cache-v4.json"))
+        // v5: also each "limit reached" row's exact reset, and only refused requests count as limit hits.
+        return dir.appendingPathComponent("claude-usage-cache-v5.json")
     }()
     private var loadedDisk = false
     /// Saving rewrites the whole cache (about 50 MB of JSON for a month of heavy use), and some transcript grows
@@ -112,6 +130,7 @@ final class ClaudeUsageScanner {
         var limitHits: [Date]
         var apiMillis: [String: Int]
         var format = FormatReport()
+        var resets: [LimitReset] = []
     }
 
     /// Called with the number of files parsed so far during a scan that has real work to do.
@@ -131,9 +150,21 @@ final class ClaudeUsageScanner {
         var seen: Set<String> = []
         var changed = false
         var results: [FileResult] = []
+        // For files with no account recorded; read once per scan.
+        let history = PlanUsageLog.history()
+        var paths: [String] = []
+        func attributed(_ r: FileResult, _ path: String) -> FileResult {
+            paths.append(path)
+            guard r.org == nil, let org = Self.desktopOrg(path) else { return r }
+            var r = r; r.org = org
+            return r
+        }
         for root in roots {
+            // The Claude desktop app keeps each session's transcripts under a hidden ".claude" folder, so skipping
+            // hidden files there skipped every one of them.
+            let desktop = root.path.contains("local-agent-mode-sessions")
             guard let e = FileManager.default.enumerator(at: root, includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey],
-                                                         options: [.skipsHiddenFiles]) else { continue }
+                                                         options: desktop ? [] : [.skipsHiddenFiles]) else { continue }
             for case let url as URL in e where url.pathExtension == "jsonl" && url.lastPathComponent != "audit.jsonl" {
                 let rv = try? url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
                 guard let mod = rv?.contentModificationDate, mod >= since else { continue }
@@ -150,7 +181,7 @@ final class ClaudeUsageScanner {
                         c.orgSearched = true
                         cache[url.path] = c; changed = true
                     }
-                    results.append(c); continue
+                    results.append(attributed(c, url.path)); continue
                 }
                 var r: FileResult
                 // Appending to a result without health would leave the check counting only the new rows.
@@ -163,7 +194,7 @@ final class ClaudeUsageScanner {
                 done += 1
                 if done % 10 == 0 { progress?(done) }
                 cache[url.path] = r
-                results.append(r)
+                results.append(attributed(r, url.path))
                 changed = true
             }
         }
@@ -173,9 +204,34 @@ final class ClaudeUsageScanner {
         }
         // A failed save (a full disk, say) is tried again next scan.
         if Date().timeIntervalSince(savedAt) >= Self.saveEvery { saveIfNeeded() }
+        // When each account first shows up in the desktop app: its Cowork sessions (account in the folder) and its
+        // own usage readings. A desktop-app session with no account recorded, from before a second account appeared
+        // there, can only be the one that was.
+        var desktopFirst: [String: Date] = [:]
+        for (r, p) in zip(results, paths) where p.contains("local-agent-mode-sessions") {
+            if let o = r.org, let t = r.calls.map(\.time).min() { desktopFirst[o] = min(desktopFirst[o] ?? t, t) }
+        }
+        for (o, samples) in history { if let t = samples.first?.time { desktopFirst[o] = min(desktopFirst[o] ?? t, t) } }
+        results = results.map { r in
+            guard r.org == nil else { return r }
+            var r = r
+            let times = r.calls.map(\.time)
+            r.org = (r.entrypoint == "claude-desktop" ? AccountGuess.desktopAccount(times: times, desktopFirst: desktopFirst) : nil)
+                ?? AccountGuess.org(times: times, history: history)
+            return r
+        }
         var r = Self.combine(results, since: since)
         r.format = Self.formatReport(results, recentSince: Date().addingTimeInterval(-Self.recentWindow))
         return r
+    }
+
+    /// The account a Claude desktop app session belongs to, from its folder:
+    /// local-agent-mode-sessions/<install>/<organization>/local_<session>/… Those transcripts record no account.
+    static func desktopOrg(_ path: String) -> String? {
+        let parts = path.components(separatedBy: "/")
+        guard let i = parts.firstIndex(of: "local-agent-mode-sessions"), i + 2 < parts.count else { return nil }
+        let org = parts[i + 2].lowercased()
+        return org.count == 36 && org.filter({ $0 == "-" }).count == 4 ? org : nil
     }
 
     /// Writes the cache if anything changed since the last save. Run on the scan queue: hourly from `scan`, and
@@ -252,6 +308,7 @@ final class ClaudeUsageScanner {
         var best: [String: Call] = [:]
         var titles: [String: String] = [:]
         var hits: [Date] = []
+        var resets: [LimitReset] = []
         var api: [String: Int] = [:]
         for r in results {
             for var c in r.calls {
@@ -263,10 +320,11 @@ final class ClaudeUsageScanner {
             }
             titles.merge(r.titles) { a, _ in a }
             hits += r.limitHits
+            resets += (r.resets ?? []).map { var x = $0; x.org = r.org; return x }
             api.merge(r.apiMillis) { max($0, $1) }
         }
         return Result(calls: best.values.filter { $0.time >= since }.sorted { $0.time < $1.time },
-                      titles: titles, limitHits: hits.sorted(), apiMillis: api)
+                      titles: titles, limitHits: hits.sorted(), apiMillis: api, resets: resets.sorted { $0.seen < $1.seen })
     }
 
     private static let isoFrac: ISO8601DateFormatter = {
@@ -295,11 +353,13 @@ final class ClaudeUsageScanner {
         var out = new
         if var h = old.health, let n = new.health { h.add(n); out.health = h }
         out.org = new.org ?? old.org
+        out.entrypoint = new.entrypoint ?? old.entrypoint
         // Only the new bytes were just searched; the rest counts only if it was searched before.
         if old.orgSearched != true { out.orgSearched = nil }
         out.calls = Array(byId.values)
         out.titles = old.titles.merging(new.titles) { _, b in b }
         out.limitHits = old.limitHits + new.limitHits
+        out.resets = (old.resets ?? []) + (new.resets ?? [])
         out.apiMillis = old.apiMillis.merging(new.apiMillis) { max($0, $1) }
         return out
     }
@@ -337,6 +397,7 @@ final class ClaudeUsageScanner {
             if judged {
                 health.checked += 1
                 if let v = obj["version"] as? String { health.version = v }
+                if let e = obj["entrypoint"] as? String { out.entrypoint = e }
             }
             let session = obj["sessionId"] as? String ?? url.deletingPathExtension().lastPathComponent
             if isTitle {
@@ -355,7 +416,13 @@ final class ClaudeUsageScanner {
             if let q = obj["quotaLimits"] as? [String: Any] {
                 if judged, !Self.knownLimitTypes.contains(q["rateLimitType"] as? String ?? "") { problem(.unknownLimit) }
                 if (q["rateLimitType"] as? String) == "five_hour" {
-                    out.limitHits.append(ts)
+                    // Only a refused request is a limit hit; the same row also reports warnings and allowed states.
+                    if (q["status"] as? String) == "rejected" {
+                        out.limitHits.append(ts)
+                        if let r = q["resetsAt"] as? Double {
+                            out.resets = (out.resets ?? []) + [LimitReset(seen: ts, resetsAt: Date(timeIntervalSince1970: r))]
+                        }
+                    }
                     continue
                 }
             }
@@ -377,6 +444,10 @@ final class ClaudeUsageScanner {
             let cc = u["cache_creation"] as? [String: Any]
             var cw5 = i(cc, "ephemeral_5m_input_tokens"), cw1h = i(cc, "ephemeral_1h_input_tokens")
             if cc == nil { cw5 = i(u, "cache_creation_input_tokens") }
+            // With several iterations (an advisor turn) the 5m/1h split covers only the first one, while the total
+            // covers them all; the rest is counted at the 5-minute rate instead of being dropped.
+            let written = i(u, "cache_creation_input_tokens")
+            if written > cw5 + cw1h { cw5 += written - cw5 - cw1h }
             let input = i(u, "input_tokens"), cr = i(u, "cache_read_input_tokens"), output = i(u, "output_tokens")
             var cost = Pricing.claude(model).map { Pricing.cost($0, input: input, cw5: cw5, cw1h: cw1h, cacheRead: cr, output: output) } ?? 0
             // Advisor calls are billed separately and only appear in `iterations`.

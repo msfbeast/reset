@@ -41,7 +41,7 @@ enum MCPServer {
         case "initialize":
             let requested = params?["protocolVersion"] as? String ?? "2025-06-18"
             return result(["protocolVersion": requested, "capabilities": ["tools": [String: Any]()],
-                           "serverInfo": ["name": "reset", "version": "0.3.22"]])
+                           "serverInfo": ["name": "reset", "version": "0.3.23"]])
         case "tools/list":
             return result(["tools": tools])
         case "tools/call":
@@ -173,7 +173,11 @@ enum MCPServer {
                 claude["resets_at_local"] = local.string(from: r)
                 claude["minutes_until_reset"] = Int(r.timeIntervalSince(now) / 60)
             }
-            if let b = c.blockedUntil, b > now { claude["weekly_limit_until"] = iso.string(from: b) }
+            if let b = c.blockedUntil, b > now {
+                claude["weekly_limit_until"] = iso.string(from: b)
+                // The latest it can lift, worked out from the Claude desktop app's history; it may lift sooner.
+                if c.blockedEstimate == true { claude["weekly_limit_until_is_estimate"] = true }
+            }
             let weekly = c.weeklyResetsAt.flatMap { $0 > now ? c.weeklyUsed : nil }
             if let w = weekly, let r = c.weeklyResetsAt {
                 claude["weekly_percent_used"] = Int(w.rounded())
@@ -211,7 +215,8 @@ enum MCPServer {
             let budgetStatus = budget?.status(used: used)
             if let b = c.blockedUntil, b > now {
                 // Nothing can run at all, so this outranks any budget.
-                out["advice"] = "The weekly limit is exhausted until \(local.string(from: b)). Pause non-essential work."
+                let until = (c.blockedEstimate == true ? "until about " : "until ") + local.string(from: b)
+                out["advice"] = "The weekly limit is exhausted \(until). Pause non-essential work."
             } else if let budget, budgetStatus == .over {
                 // Over budget is the most specific instruction there is: it names the task and the model to switch to.
                 out["advice"] = budget.advice(used: used)

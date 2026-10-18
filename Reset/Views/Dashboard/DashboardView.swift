@@ -320,8 +320,8 @@ struct DashboardView: View {
     private var multipleHelp: String {
         let days = usage.rangeDays
         let d = days < 1 ? String(format: "%.0f hours", days * 24) : String(format: days < 10 ? "%.1f days" : "%.0f days", days)
-        return "\(Dash.money(usage.totalCost)) of API value ÷ \(Dash.money(usage.planCostForRange)), which is \(d) of a "
-            + "\(Dash.money(usage.effectivePlan))/month plan."
+        return "\(Dash.money(usage.totalCost)) of API value ÷ \(Dash.money(usage.planCostForRange)) of plan: up to \(d) of a "
+            + "\(Dash.money(usage.effectivePlan))/month plan, each account's counted from its first response."
     }
 
     private func planButton(_ title: String) -> some View {
@@ -411,7 +411,8 @@ struct DashboardView: View {
                         legendRow(Dash.blue, "Cache read", pct(mix.cacheRead), first: true)
                         legendRow(Dash.violet, "Cache write", pct(mix.cacheWrite))
                         legendRow(Dash.claude, "Output", pct(mix.output))
-                        legendRow(.white.opacity(0.85), "Input", pct(mix.input))
+                        // Nearly all of it is the advisor's when one is used, so a bare "Input" misled.
+                        legendRow(.white.opacity(0.85), mix.advisor > mix.input / 2 ? "Input & advisor" : "Input", pct(mix.input))
                     }
                 }
             }

@@ -35,6 +35,9 @@ struct WindowStatus: Identifiable, Equatable {
     var canAutoStart: Bool
     /// A longer limit (weekly, monthly) is exhausted until this time, so a fresh session window would not help.
     var blockedUntil: Date? = nil
+    /// `blockedUntil` is the latest the limit can lift, worked out from the Claude desktop app's history, not a
+    /// reset Anthropic reported; it's shown as "about".
+    var blockedEstimate = false
     /// When `usedPercent` was measured, if it is not live.
     var usageAsOf: Date? = nil
     /// The most recent real API response seen in this tool's logs, for pacing how often live usage is fetched.

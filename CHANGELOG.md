@@ -2,6 +2,16 @@
 
 The latest release is on the [Releases page](https://github.com/msfbeast/reset/releases/latest). Older builds are kept but not listed; this file is the history.
 
+## 0.3.23 — accurate numbers
+
+- The Claude desktop app's own sessions are counted (they sit in a hidden folder and were skipped).
+- Older sessions, from before Claude Code recorded the account, are split between accounts from the desktop app's records instead of all landing on the signed-in one. On the maintainer's Mac that moved about $1,300 from Team back to Pro.
+- Each plan counts from its own account's first use, in every range, the menu and the widgets, so a new account isn't charged a whole month.
+- The dashboard's windows are placed from Claude's exact reset times, per account, and no longer shift as days pass; a window starts at your prompt, not Claude's first reply.
+- Reset times no longer show a minute early; weekly lift times worked out from history read "about".
+- The weekly 80% warning covers every account.
+- The first launch re-reads all transcripts once (about 20 seconds).
+
 ## 0.3.22 — all means all
 
 - The dashboard's All range is now all time: every transcript on disk, not just the last 35 days, labelled "since" your first response. The value multiple for All spreads your plan over the same days. The "When you build" heatmap still shows the last 5 weeks.

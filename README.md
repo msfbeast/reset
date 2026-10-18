@@ -100,6 +100,8 @@ The first launch opens a short setup guide that covers all of this. You can run 
 
 **I have two Claude accounts.** Each gets its own entry, window, costs and plan price, and you can name them (Settings → General → Claude accounts). Live usage, the forecast, auto-start and budgets follow the account Claude Code is signed in to; the other one is estimated. See [Troubleshooting](#troubleshooting) for details.
 
+**How does it split costs between two accounts?** Claude Code records which account each session ran under, but only since early October 2026. For older sessions Reset works it out: Claude desktop app sessions go to the account named in their folder, and Code-tab sessions from before a second account appeared in the desktop app go to the one that was there. Otherwise the desktop app's own usage history decides, and anything left goes to the account Claude Code is signed in to. It's a well-supported guess for those older sessions, not a record, so their split can be slightly off; everything since early October is exact.
+
 **Does it read my prompts or code?** No. From Claude Code's local logs it keeps token counts, model names, times, tool names, project folders and session titles, never the text of your prompts or Claude's replies. See [Privacy](#privacy) for exactly what leaves your Mac and when.
 
 **Is this made by Anthropic?** No. Reset is an independent, open source project, not affiliated with or endorsed by Anthropic.

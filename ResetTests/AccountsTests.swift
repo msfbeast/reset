@@ -317,3 +317,102 @@ final class MascotAccountTests: XCTestCase {
         XCTAssertEqual(MascotController.shown([team, pro, codex], activeClaude: "claude").first?.name, "Claude · Team")
     }
 }
+
+/// Each account has its own 5-hour limit, so its windows are its own chain.
+final class WindowsPerAccountTests: XCTestCase {
+    private let day = Calendar.current.startOfDay(for: Date(timeIntervalSince1970: 1_792_200_000))
+    private func at(_ h: Double) -> Date { day.addingTimeInterval(h * 3600) }
+    private func call(_ h: Double, org: String?, session: String) -> Call {
+        Call(id: UUID().uuidString, time: at(h), model: "claude-opus-5-5", session: session, project: "/tmp/p", sidechain: false,
+             input: 0, cw5: 0, cw1h: 0, cacheRead: 0, output: 0, advisorTokens: 0, tools: 0, mcpServers: [:], webSearches: 0,
+             mcpAttribution: nil, cost: 0, autoStart: false, org: org)
+    }
+
+    func testAProWindowInsideATeamWindowStillCounts() {
+        // Team from 2:40 PM; switching to Pro at 6:16 PM starts Pro's own window.
+        let calls = [call(14.7, org: "team", session: "t"), call(18.27, org: "pro", session: "p"), call(18.5, org: "team", session: "t")]
+        let w = UsageStore.windows(calls, since: day)
+        XCTAssertEqual(w.count, 2, "one window each, not Pro folded into Team's")
+        XCTAssertEqual(w.map(\.account), ["team", "pro"])
+        XCTAssertNotEqual(w[0].id, w[1].id)
+    }
+
+    func testUntaggedCallsGoWithTheirSession() {
+        // A subagent transcript names no account; it belongs to its session's, so it adds no window of its own.
+        let calls = [call(9, org: "pro", session: "p"), call(9.5, org: nil, session: "p"), call(15, org: "pro", session: "p")]
+        XCTAssertEqual(UsageStore.windows(calls, since: day).count, 2)
+    }
+}
+
+/// Live usage never stacks fetches, and a Keychain read nobody answers gives up.
+final class LiveFetchGuardTests: XCTestCase {
+    func testNoSecondFetchWhileOneIsRunning() {
+        let now = Date()
+        XCTAssertTrue(LiveClaude.shouldFetch(now: now, lastAttempt: .distantPast, backoffUntil: .distantPast, interval: 115))
+        XCTAssertFalse(LiveClaude.shouldFetch(now: now, lastAttempt: .distantPast, backoffUntil: .distantPast, interval: 115, inFlight: true))
+    }
+
+    func testAToolThatHangsIsStopped() {
+        let start = Date()
+        XCTAssertNil(LiveClaude.run("/bin/sleep", ["10"], timeout: 0.5))
+        XCTAssertLessThan(Date().timeIntervalSince(start), 5, "gave up at the timeout, not when the tool finished")
+        XCTAssertEqual(LiveClaude.run("/bin/echo", ["hi"], timeout: 5).map { String(decoding: $0, as: UTF8.self) }, "hi\n")
+        XCTAssertNil(LiveClaude.run("/usr/bin/false", [], timeout: 5), "a failed tool reads as nothing")
+    }
+}
+
+/// Codex's limits are found from the end of its newest log, without reading every log on each rescan.
+final class CodexLimitsTests: XCTestCase {
+    private func line(_ used: Int) -> String {
+        #"{"type":"event_msg","payload":{"rate_limits":{"primary":{"used_percent":\#(used),"window_minutes":300}}}}"#
+    }
+
+    func testTheLatestLimitsComeFromTheEndOfTheLog() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: dir) }
+        let filler = String(repeating: #"{"type":"response_item","payload":{"text":"x"}}"# + "\n", count: 20_000)
+        try ([line(10), filler, line(42)].joined(separator: "\n") + "\n").write(to: dir.appendingPathComponent("a.jsonl"), atomically: true, encoding: .utf8)
+        let rl = CodexSource.lastRateLimits(in: dir.appendingPathComponent("a.jsonl"))
+        XCTAssertEqual((rl?["primary"] as? [String: Any])?["used_percent"] as? Int, 42, "the newest, from the tail")
+
+        // Only at the start of a long log: the tail has none, so the whole file is read.
+        try ([line(7), filler].joined(separator: "\n") + "\n").write(to: dir.appendingPathComponent("b.jsonl"), atomically: true, encoding: .utf8)
+        let early = CodexSource.lastRateLimits(in: dir.appendingPathComponent("b.jsonl"))
+        XCTAssertEqual((early?["primary"] as? [String: Any])?["used_percent"] as? Int, 7)
+    }
+
+    func testAHalfLineAtTheStartOfATailIsSkipped() {
+        let data = Data(("used_percent\":99}}}}\n" + line(5) + "\n").utf8)
+        XCTAssertEqual(((CodexSource.lastRateLimits(data, partialFirstLine: true)?["primary"]) as? [String: Any])?["used_percent"] as? Int, 5)
+    }
+}
+
+/// The widget snapshot reads only the last month, found by binary search over calls in time order.
+final class RecentCallsTests: XCTestCase {
+    func testTheSliceStartsAtTheFirstCallFromThatTime() {
+        let t0 = Date(timeIntervalSince1970: 1_790_000_000)
+        func call(_ h: Double) -> Call {
+            Call(id: "\(h)", time: t0.addingTimeInterval(h * 3600), model: "m", session: "s", project: "/p", sidechain: false, input: 0,
+                 cw5: 0, cw1h: 0, cacheRead: 0, output: 0, advisorTokens: 0, tools: 0, mcpServers: [:], webSearches: 0,
+                 mcpAttribution: nil, cost: 0, autoStart: false, org: nil)
+        }
+        let calls = [0, 1, 2, 2, 5].map { call(Double($0)) }
+        XCTAssertEqual(UsageStore.calls(calls, since: t0.addingTimeInterval(2 * 3600)).map(\.id), ["2.0", "2.0", "5.0"], "ties included")
+        XCTAssertEqual(UsageStore.calls(calls, since: t0.addingTimeInterval(9 * 3600)).count, 0)
+        XCTAssertEqual(UsageStore.calls(calls, since: .distantPast).count, 5)
+        XCTAssertEqual(UsageStore.calls([], since: t0).count, 0)
+    }
+}
+
+/// All time charges each account's plan from that account's own first response.
+final class AllTimePlanTests: XCTestCase {
+    func testAnAccountAddedLaterIsChargedFromItsOwnStart() {
+        let now = Date(timeIntervalSince1970: 1_792_300_000)
+        let cost = UsageStore.allTimePlanCost(prices: [("claude", 30), ("claude-pro", 20)],
+                                              first: ["claude": now.addingTimeInterval(-90 * 86400), "claude-pro": now.addingTimeInterval(-6 * 86400)],
+                                              now: now)
+        XCTAssertEqual(cost, 30 * 3 + 20 * 0.2, accuracy: 0.001, "90 days of Team, 6 days of Pro")
+        XCTAssertEqual(UsageStore.allTimePlanCost(prices: [("claude-x", 20)], first: [:], now: now), 0, "no responses, nothing charged")
+    }
+}

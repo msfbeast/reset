@@ -94,7 +94,7 @@ struct MenuView: View {
 
     private var subline: String {
         guard let h = hero else { return "" }
-        if let b = h.blockedUntil, b > store.now { return "Back \(Fmt.when(b, now: store.now))" }
+        if let b = h.blockedUntil, b > store.now { return "Back \(h.blockedEstimate ? "by about " : "")\(Fmt.when(b, now: store.now))" }
         if let r = h.resetsAt {
             // With the sign-in banner showing, the reason is already on screen; "estimated" alone is enough here.
             let note = store.liveNeedsSignIn && h.id == "claude" ? (h.isEstimate ? "estimated" : nil) : store.estimateNote(for: h)
@@ -190,7 +190,8 @@ struct MenuView: View {
     private var stats: some View {
         let today = store.usage.todayCost
         let week = store.usage.weekCost
-        let plan = store.usage.effectivePlan * 7 / 30
+        // Every account's week against every account's plan, like the widget; not the dashboard's account filter.
+        let plan = store.usage.planCost(since: Date().addingTimeInterval(-7 * 86400), account: nil)
         return HStack(spacing: 8) {
             StatChip(value: Dash.money(today), label: "today")
             StatChip(value: Dash.money(week), label: "7 days")

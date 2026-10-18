@@ -2,6 +2,10 @@
   "quota.events" : [
     {
       "kind" : "activity",
+      "time" : "2026-03-03T13:02:00.000Z"
+    },
+    {
+      "kind" : "activity",
       "time" : "2026-03-03T13:02:04.000Z"
     },
     {
@@ -31,6 +35,10 @@
     "weeklyBlockUntil" : "2026-03-07T02:00:00.000Z"
   },
   "streamed.events" : [
+    {
+      "kind" : "activity",
+      "time" : "2026-03-02T09:14:01.000Z"
+    },
     {
       "kind" : "activity",
       "time" : "2026-03-02T09:14:05.120Z"

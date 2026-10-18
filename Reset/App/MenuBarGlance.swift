@@ -168,7 +168,19 @@ enum MenuBarPill {
         }
     }
 
+    /// The last pill drawn. The menu bar label is rebuilt every second (the clock ticks), but the pill's text only
+    /// changes about once a minute; drawing a fresh image each second kept the graphics memory climbing.
+    @MainActor private static var last: (glance: MenuBarGlance, scale: CGFloat, image: NSImage)?
+
     @MainActor static func image(_ g: MenuBarGlance) -> NSImage? {
+        let scale = NSScreen.main?.backingScaleFactor ?? 2
+        if let last, last.glance == g, last.scale == scale { return last.image }
+        guard let img = draw(g, scale: scale) else { return nil }
+        last = (g, scale, img)
+        return img
+    }
+
+    @MainActor private static func draw(_ g: MenuBarGlance, scale: CGFloat) -> NSImage? {
         let (fill, ink) = colors(g.tone)
         let view = HStack(spacing: 3) {
             if g.warning { Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 9.5, weight: .bold)) }
@@ -189,7 +201,7 @@ enum MenuBarPill {
         .background(RoundedRectangle(cornerRadius: g.detail == nil ? 8.5 : 6, style: .continuous).fill(fill))
         .fixedSize()
         let r = ImageRenderer(content: view)
-        r.scale = NSScreen.main?.backingScaleFactor ?? 2
+        r.scale = scale
         guard let img = r.nsImage else { return nil }
         img.isTemplate = false
         return img

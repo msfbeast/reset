@@ -39,6 +39,20 @@ final class CursorTests: XCTestCase {
         XCTAssertTrue(CursorSource.isDue((now.addingTimeInterval(-60), .success(ended)), now: now), "a new month is starting")
     }
 
+    func testFailuresBackOffInsteadOfRetryingEveryMinute() {
+        let blip: Result<CursorSource.Reading, CursorSource.Problem> = .failure(.init(message: "offline"))
+        let refused: Result<CursorSource.Reading, CursorSource.Problem> = .failure(.init(message: "HTTP 401", lasting: true))
+        XCTAssertEqual([1, 2, 3, 4, 9].map { CursorSource.retryDelay(misses: $0, lasting: false) }, [60, 300, 900, 1800, 1800])
+        XCTAssertFalse(CursorSource.isDue((now.addingTimeInterval(-299), blip), misses: 2, now: now), "second blip: 5 minutes")
+        XCTAssertTrue(CursorSource.isDue((now.addingTimeInterval(-300), blip), misses: 2, now: now))
+        XCTAssertFalse(CursorSource.isDue((now.addingTimeInterval(-600), refused), misses: 1, now: now),
+                       "a refused sign-in won't fix itself in a minute")
+        XCTAssertTrue(CursorSource.isDue((now.addingTimeInterval(-1800), refused), misses: 1, now: now))
+        XCTAssertFalse(CursorSource.isDue((now.addingTimeInterval(-3600), refused), misses: 3, now: now), "then every 2 hours")
+        // At most this many requests a day for a sign-in Cursor keeps refusing, instead of about 1,440.
+        XCTAssertLessThanOrEqual(86400 / CursorSource.retryDelay(misses: 5, lasting: true), 12)
+    }
+
     func testABlipShowsTheLastGoodReadingForAWhile() {
         let good = CursorSource.Reading(percent: 40, resetsAt: now.addingTimeInterval(86400), plan: nil, fetchedAt: now)
         let failed: Result<CursorSource.Reading, CursorSource.Problem> = .failure(.init(message: "offline"))

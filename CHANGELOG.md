@@ -2,6 +2,13 @@
 
 The latest release is on the [Releases page](https://github.com/msfbeast/reset/releases/latest). Older builds are kept but not listed; this file is the history.
 
+## 0.3.21 — lighter
+
+- Much less memory: about 70 MB instead of 400+. The menu bar pill was being redrawn as a new image every second though its text changes about once a minute; it now redraws only when it changes.
+- Cursor backs off after failures (5, 15, then every 30 minutes; a refused sign-in waits up to 2 hours) instead of retrying every minute.
+- Live usage for other desktop-app accounts moves to Settings → Advanced, with a plain explanation of the Keychain key it uses.
+- A CONTRIBUTING.md: what fits, the privacy rules, and how to run the tests.
+
 ## 0.3.20 — every account live, and Cursor
 
 - Live usage for the other accounts signed in to the Claude desktop app, not just the one Claude Code in Terminal uses: Settings → General → Also other accounts in the Claude desktop app. Off by default; macOS asks before Reset can read the desktop app's key, and the sign-ins are only sent to api.anthropic.com. With it on, the top card, menu bar, mascot and MCP server show live numbers for whichever account you're using (thanks @DhananjayBhosale, whose pull request also found the `claude auth status` account mix-up that 0.3.19 fixed).

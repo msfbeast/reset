@@ -10,7 +10,8 @@ struct CursorSource: WindowSource {
     /// Off, it only says what switching it on does, and reads nothing.
     var enabled = true
 
-    /// A month's usage moves slowly; every 5 minutes is plenty, and a failed fetch is tried again after a minute.
+    /// A month's usage moves slowly; every 5 minutes is plenty. A failed fetch is tried again after a minute at first,
+    /// then less and less often (see `retryDelay`).
     static let interval: TimeInterval = 300, retryInterval: TimeInterval = 60
 
     func read(now: Date) -> WindowStatus {
@@ -49,7 +50,12 @@ struct CursorSource: WindowSource {
         var fetchedAt: Date
     }
 
-    struct Problem: Error, Equatable { var message: String }
+    struct Problem: Error, Equatable {
+        var message: String
+        /// Asking again soon won't help: a refused or expired sign-in, no sign-in, or a plan without usage. These
+        /// wait for the Cursor app (or the user) to change something.
+        var lasting = false
+    }
 
     /// Called on the main queue when a fetch finishes, so the app rescans with the new reading.
     static var onUpdate: (() -> Void)?
@@ -58,6 +64,8 @@ struct CursorSource: WindowSource {
     private static var last: (attempt: Date, result: Result<Reading, Problem>)?
     private static var lastGood: Reading?
     private static var fetching = false
+    /// Fetches in a row that failed or found the month already over, for backing off.
+    private static var misses = 0
 
     /// The latest reading (nil before the first), starting a fetch in the background once one is due. Never waits
     /// for the network, so a slow connection can't hold up the scan that every other tool's countdown waits on.
@@ -65,12 +73,14 @@ struct CursorSource: WindowSource {
         lock.lock(); defer { lock.unlock() }
         let previous = last
         let result = previous.map { shown($0.result, lastGood: lastGood, now: now) }
-        guard !fetching, isDue(previous, now: now) else { return result }
+        guard !fetching, isDue(previous, misses: misses, now: now) else { return result }
         fetching = true
         DispatchQueue.global(qos: .utility).async {
             fetch(now: now) { result in
                 lock.lock()
                 if case .success(let r) = result { lastGood = r }
+                let good = (try? result.get()).map { $0.resetsAt.map { $0 > Date() } ?? true } ?? false
+                misses = good ? 0 : misses + 1
                 last = (now, result)
                 fetching = false
                 lock.unlock()
@@ -87,18 +97,37 @@ struct CursorSource: WindowSource {
         return result
     }
 
-    /// A failure, or a month that has ended, is asked again after a minute; a good reading after five.
-    static func isDue(_ previous: (attempt: Date, result: Result<Reading, Problem>)?, now: Date) -> Bool {
+    /// A good reading is asked again after five minutes. A failure, or a month that has ended, after `retryDelay`.
+    static func isDue(_ previous: (attempt: Date, result: Result<Reading, Problem>)?, misses: Int = 0, now: Date) -> Bool {
         guard let previous else { return true }
         let reading = try? previous.result.get()
         let soon = reading == nil || reading?.resetsAt.map { $0 <= now } == true
-        return now.timeIntervalSince(previous.attempt) >= (soon ? retryInterval : interval)
+        let lasting = previousProblem(previous.result)?.lasting ?? false
+        return now.timeIntervalSince(previous.attempt) >= (soon ? retryDelay(misses: misses, lasting: lasting) : interval)
+    }
+
+    private static func previousProblem(_ r: Result<Reading, Problem>) -> Problem? {
+        if case .failure(let p) = r { return p }
+        return nil
+    }
+
+    /// How long to wait after `misses` failed fetches in a row. Retrying every minute forever meant about 1,440
+    /// requests a day to Cursor for a revoked sign-in or a plan without usage. A blip still gets a quick second try;
+    /// after that it's 5, 15, then every 30 minutes, and a lasting problem waits 30 minutes, then 2 hours.
+    static func retryDelay(misses: Int, lasting: Bool) -> TimeInterval {
+        if lasting { return misses <= 1 ? 1800 : 7200 }
+        switch misses {
+        case ...1: return retryInterval
+        case 2: return 300
+        case 3: return 900
+        default: return 1800
+        }
     }
 
     private static func fetch(now: Date, done: @escaping (Result<Reading, Problem>) -> Void) {
-        guard let auth = readSignIn() else { return done(.failure(Problem(message: "Sign in to the Cursor app to read its usage"))) }
+        guard let auth = readSignIn() else { return done(.failure(Problem(message: "Sign in to the Cursor app to read its usage", lasting: true))) }
         if let exp = expiry(of: auth.token), exp < now {
-            return done(.failure(Problem(message: "Cursor's sign-in has expired. Opening Cursor renews it")))
+            return done(.failure(Problem(message: "Cursor's sign-in has expired. Opening Cursor renews it", lasting: true)))
         }
         var req = URLRequest(url: URL(string: "https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage")!,
                              timeoutInterval: 15)
@@ -111,13 +140,13 @@ struct CursorSource: WindowSource {
             let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
             if let err { return done(.failure(Problem(message: "Couldn't reach Cursor: \(err.localizedDescription)"))) }
             if code == 401 || code == 403 {
-                return done(.failure(Problem(message: "Cursor didn't accept the sign-in (HTTP \(code)). Opening Cursor renews it")))
+                return done(.failure(Problem(message: "Cursor didn't accept the sign-in (HTTP \(code)). Opening Cursor renews it", lasting: true)))
             }
             guard code == 200, let data, let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
                 return done(.failure(Problem(message: "Unexpected reply from Cursor (HTTP \(code))")))
             }
             guard var r = reading(from: obj, at: Date()) else {
-                return done(.failure(Problem(message: "Cursor didn't report usage for this plan")))
+                return done(.failure(Problem(message: "Cursor didn't report usage for this plan", lasting: true)))
             }
             r.plan = auth.plan
             done(.success(r))

@@ -122,7 +122,7 @@ If macOS asks whether `security` may read "Claude Code-credentials" from your Ke
 
 **The countdown is off, or the window started earlier than Reset thinks.** Without live usage, Reset can't see Claude used on claude.ai or in the desktop app, only Claude Code. Live usage fixes this. Without it, pick **I just used Claude on the web** from the menu's **…** button when you start there.
 
-**I use two Claude accounts (say, a work Team plan and a personal Pro plan).** Reset shows each as its own entry, with its own window and countdown, worked out from that account's Claude Code sessions. The menu's top card, the menu bar and the mascot follow the account you're using: switching accounts in the Claude desktop app moves them. Live usage, the forecast, auto-start and the widgets go through the account Claude Code in Terminal is signed in to; with live usage on, Reset asks Anthropic which account that is, because `claude auth status` can show the Claude desktop app's account instead. Other accounts are estimated from their sessions and the desktop app's readings, unless they're signed in to the Claude desktop app: then turn on **Settings → General → Also other accounts in the Claude desktop app** for live usage there too. The MCP server answers for the account the asking agent runs on. The dashboard's All / Team / Pro switch splits costs, sessions and projects by account, and each account can have its own plan price (Settings → General).
+**I use two Claude accounts (say, a work Team plan and a personal Pro plan).** Reset shows each as its own entry, with its own window and countdown, worked out from that account's Claude Code sessions. The menu's top card, the menu bar and the mascot follow the account you're using: switching accounts in the Claude desktop app moves them. Live usage, the forecast, auto-start and the widgets go through the account Claude Code in Terminal is signed in to; with live usage on, Reset asks Anthropic which account that is, because `claude auth status` can show the Claude desktop app's account instead. Other accounts are estimated from their sessions and the desktop app's readings, unless they're signed in to the Claude desktop app: then turn on **Settings → Advanced → Live usage for other accounts in the Claude desktop app** for live usage there too. The MCP server answers for the account the asking agent runs on. The dashboard's All / Team / Pro switch splits costs, sessions and projects by account, and each account can have its own plan price (Settings → General).
 
 **The menu bar shows only the countdown, with no percentage.** There's no usage reading yet, and Reset won't show the clock as if it were usage. Turn on live usage. Want plain text instead of the colored pill? **Settings → Appearance → Menu bar**.
 
@@ -148,14 +148,14 @@ Reset reads local files only:
 
 - Claude Code transcripts in `~/.claude/projects`. Reset scans them for usage and keeps only token counts, models, timestamps, tool and MCP names, project folders and session titles, in a cache in `~/Library/Application Support/Reset`. Your prompts and Claude's replies are never stored.
 - `~/Library/Application Support/Claude/plan-usage-history.json` from the Claude desktop app
-- Only if you turn on **Also other accounts in the Claude desktop app**: the sign-in the desktop app keeps in `~/Library/Application Support/Claude/config.json`, decrypted in memory with the desktop app's key from your Keychain. macOS asks you first; click **Always Allow** so it doesn't ask again each time Reset starts. The downloaded build is ad-hoc signed, so macOS asks once more after each update. The same key can decrypt other data the desktop app encrypts on this Mac; Reset reads only the sign-in
+- Only if you turn on **Live usage for other accounts in the Claude desktop app** (Settings → Advanced): the sign-in the desktop app keeps in `~/Library/Application Support/Claude/config.json`, decrypted in memory with the desktop app's key from your Keychain. macOS asks you first; click **Always Allow** so it doesn't ask again each time Reset starts. The downloaded build is ad-hoc signed, so macOS asks once more after each update. The same key can decrypt other data the desktop app encrypts on this Mac; Reset reads only the sign-in
 - Codex session logs in `~/.codex/sessions`
 - Antigravity's local language server, while Antigravity is open
 - If you switch Cursor on: the Cursor app's sign-in and plan name in `~/Library/Application Support/Cursor/User/globalStorage/state.vscdb`, opened read-only
 
 It only sends anything off your Mac for these features, and only to the place you'd expect:
 
-- **Live Claude usage** sends Claude Code's sign-in to `api.anthropic.com` to read your usage and which account it belongs to. With **Also other accounts in the Claude desktop app** on, it does the same with the desktop app's sign-in for each of its other accounts. Reset never stores, refreshes or rewrites a sign-in.
+- **Live Claude usage** sends Claude Code's sign-in to `api.anthropic.com` to read your usage and which account it belongs to. With **Live usage for other accounts in the Claude desktop app** (Settings → Advanced) on, it does the same with the desktop app's sign-in for each of its other accounts. Reset never stores, refreshes or rewrites a sign-in.
 - **Cursor**, off until you switch it on in Settings, sends the Cursor app's sign-in to `api2.cursor.sh` to read this month's usage. Reset never stores, refreshes or rewrites that sign-in.
 - **Phone alerts** send the alert text to the ntfy server you choose. The text is only reset and run-out times, such as "Claude has reset: fresh window ready since 7:40 PM", but anyone who knows your topic name can read it, so pick a long, random topic.
 - **Update checks** ask `api.github.com` once a day whether a newer release exists. Turn this off in Settings → General.
@@ -231,6 +231,10 @@ Use `no_rows` instead of `problems` for the "no usage found" variant. `-renderSe
 ## Trademarks
 
 Reset is an independent project and is not affiliated with, endorsed by or sponsored by Anthropic, OpenAI, Google or Anysphere. Claude, Codex, Gemini, Antigravity and Cursor are trademarks of their owners. The mascots are unofficial fan art based on those products' logos; you can turn them off in Settings → Appearance. If you represent one of these companies and want the fan art changed or removed, please open an issue.
+
+## Contributing
+
+Pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for what fits, the privacy rules and how to run the tests.
 
 ## License
 

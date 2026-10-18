@@ -78,21 +78,11 @@ struct SettingsView: View {
                 Toggle("Live usage from your Claude account", isOn: $store.liveClaudeEnabled)
                 if store.liveClaudeEnabled {
                     Text(liveText).font(.caption).foregroundStyle(liveIsProblem ? Color.orange : Color.secondary)
-                    Toggle("Also other accounts in the Claude desktop app", isOn: $store.desktopAccountsEnabled)
-                    if store.desktopAccountsEnabled {
-                        HStack {
-                            Text(desktopText).font(.caption).foregroundStyle(desktopIsProblem ? Color.orange : Color.secondary)
-                            if store.desktopState == .needsPermission {
-                                Spacer()
-                                Button("Allow…") { store.allowDesktop() }
-                            }
-                        }
-                    }
                 }
             } header: {
                 Text("Claude accuracy")
             } footer: {
-                Text("Turn this on for exact usage and reset times, updated every 2 minutes while you're using Claude Code and every 5 minutes otherwise. Without it, Reset estimates from your Claude Code activity and labels its numbers \"estimated\". It reads Claude Code's sign-in from your Keychain (macOS may ask once) and sends it only to api.anthropic.com. Usage numbers only, never chats. Other accounts work the same way with the sign-in the Claude desktop app keeps for them, once you allow Reset to read the desktop app's key; Reset never changes or renews that sign-in.")
+                Text("Turn this on for exact usage and reset times, updated every 2 minutes while you're using Claude Code and every 5 minutes otherwise. Without it, Reset estimates from your Claude Code activity and labels its numbers \"estimated\". It reads Claude Code's sign-in from your Keychain (macOS may ask once) and sends it only to api.anthropic.com. Usage numbers only, never chats. Live usage for other accounts is under Advanced.")
                     .foregroundStyle(.secondary)
             }
 
@@ -381,6 +371,26 @@ struct SettingsView: View {
 
     private var advanced: some View {
         Form {
+            // Here rather than in General: few people need it, and it asks for more trust than anything else in Reset.
+            Section {
+                Toggle("Live usage for other accounts in the Claude desktop app", isOn: $store.desktopAccountsEnabled)
+                    .disabled(!store.liveClaudeEnabled)
+                if store.desktopAccountsEnabled {
+                    HStack {
+                        Text(desktopText).font(.caption).foregroundStyle(desktopIsProblem ? Color.orange : Color.secondary)
+                        if store.desktopState == .needsPermission {
+                            Spacer()
+                            Button("Allow…") { store.allowDesktop() }
+                        }
+                    }
+                }
+            } header: {
+                Text("Other Claude accounts")
+            } footer: {
+                Text("For accounts signed in to the Claude desktop app but not to Claude Code. Reset reads the desktop app's key from your Keychain (macOS asks first) to decrypt the sign-in it keeps, in memory only, and sends it only to api.anthropic.com. That key can unlock other data the desktop app encrypts; Reset reads only the sign-in, and never stores, changes or renews it. Needs live usage on (General).")
+                    .foregroundStyle(.secondary)
+            }
+
             Section {
                 ForEach(builtIns.filter { id, _ in canAutoStart(id) }, id: \.0) { id, name in
                     TextField(name, text: Binding(get: { store.commands[id] ?? "" }, set: { store.commands[id] = $0 }))

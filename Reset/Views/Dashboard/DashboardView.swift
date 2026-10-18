@@ -117,7 +117,8 @@ struct DashboardView: View {
                     .buttonStyle(.plain)
                     // ⌘1…⌘4 switch range.
                     .keyboardShortcut(KeyEquivalent(Character("\(i + 1)")))
-                    .help("\(r.rawValue) (⌘\(i + 1))")
+                    .help(r == .all ? "All time\(usage.firstCall.map { ", since " + $0.formatted(date: .abbreviated, time: .omitted) } ?? "") (⌘4)"
+                                    : "\(r.rawValue) (⌘\(i + 1))")
                     .accessibilityAddTraits(usage.range == r ? .isSelected : [])
                 }
             }
@@ -317,7 +318,7 @@ struct DashboardView: View {
     /// How the multiple is worked out: the plan price is spread over the days in the range, so short ranges
     /// (Today early in the morning) can read high.
     private var multipleHelp: String {
-        let days = usage.range.days(now: Date())
+        let days = usage.rangeDays
         let d = days < 1 ? String(format: "%.0f hours", days * 24) : String(format: days < 10 ? "%.1f days" : "%.0f days", days)
         return "\(Dash.money(usage.totalCost)) of API value ÷ \(Dash.money(usage.planCostForRange)), which is \(d) of a "
             + "\(Dash.money(usage.effectivePlan))/month plan."
@@ -366,7 +367,7 @@ struct DashboardView: View {
         case .today: return "today"
         case .week: return "in the last 7 days"
         case .month: return "in the last 30 days"
-        case .all: return "in the last \(Int(UsageStore.historyDays)) days"
+        case .all: return usage.firstCall.map { "since \($0.formatted(.dateTime.month(.abbreviated).day()))" } ?? "so far"
         }
     }
 

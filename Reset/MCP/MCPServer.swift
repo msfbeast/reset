@@ -41,7 +41,7 @@ enum MCPServer {
         case "initialize":
             let requested = params?["protocolVersion"] as? String ?? "2025-06-18"
             return result(["protocolVersion": requested, "capabilities": ["tools": [String: Any]()],
-                           "serverInfo": ["name": "reset", "version": "0.3.21"]])
+                           "serverInfo": ["name": "reset", "version": "0.3.22"]])
         case "tools/list":
             return result(["tools": tools])
         case "tools/call":

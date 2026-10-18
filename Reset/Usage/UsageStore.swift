@@ -11,11 +11,16 @@ enum UsageRange: String, CaseIterable, Identifiable {
         case .today: return Calendar.current.startOfDay(for: now)
         case .week: return now.addingTimeInterval(-7 * 86400)
         case .month: return now.addingTimeInterval(-30 * 86400)
-        case .all: return now.addingTimeInterval(-UsageStore.historyDays * 86400)
+        // Everything on disk. It was the last 35 days, which read as "all time" and wasn't.
+        case .all: return .distantPast
         }
     }
-    /// For the value multiple: how many days of plan price this range covers.
-    func days(now: Date) -> Double { max(1 / 24, now.timeIntervalSince(start(now: now)) / 86400) }
+    /// For the value multiple: how many days of plan price this range covers. All time runs from the first
+    /// response on record (`first`), since there's no fixed start.
+    func days(now: Date, first: Date? = nil) -> Double {
+        let from = self == .all ? (first ?? now) : start(now: now)
+        return max(1 / 24, now.timeIntervalSince(from) / 86400)
+    }
 }
 
 struct SessionSummary: Identifiable {
@@ -56,7 +61,8 @@ struct UsageWindow: Identifiable {
 
 @Observable
 final class UsageStore {
-    static let historyDays: Double = 35
+    /// The "When you build" heatmap covers this many days, so a habit from months ago doesn't outweigh this month's.
+    static let heatmapDays: Double = 35
 
     private(set) var calls: [Call] = []
     private(set) var titles: [String: String] = [:]
@@ -151,7 +157,8 @@ final class UsageStore {
         loading = true
         filesRead = 0
         scanner.progress = { [weak self] n in DispatchQueue.main.async { self?.filesRead = n } }
-        let since = Date().addingTimeInterval(-Self.historyDays * 86400)
+        // Every transcript on disk, so "All" is all time. Files the cache already holds aren't re-read.
+        let since = Date.distantPast
         queue.async { [weak self] in
             guard let self else { return }
             let r = self.scanner.scan(since: since)
@@ -290,7 +297,13 @@ final class UsageStore {
     var effectivePlan: Double {
         Demo.isOn ? 100 : Self.monthlyPlan(main: planMonthlyUSD, others: otherPlansUSD, accounts: accounts.map(\.id), account: account)
     }
-    var planCostForRange: Double { effectivePlan * range.days(now: Date()) / 30 }
+    var planCostForRange: Double { effectivePlan * rangeDays / 30 }
+
+    /// Days the chosen range covers, all time counted from the first response on record.
+    var rangeDays: Double { range.days(now: Date(), first: firstCall) }
+
+    /// When the oldest response on record was, for "All" ("since Jul 14").
+    var firstCall: Date? { memoized("firstCall") { calls.lazy.map(\.time).min() } }
 
     var valueMultiple: Double? {
         let plan = planCostForRange
@@ -319,9 +332,15 @@ final class UsageStore {
     }
 
     /// Output tokens by weekday (Mon = 0) and hour, over the full history, every account.
-    var heatmap: [[Double]] { memoized("heatmap") { Self.heatmap(calls) } }
+    var heatmap: [[Double]] { memoized("heatmap") { Self.heatmap(Self.recent(calls)) } }
     /// The same for the dashboard's chosen account.
-    var scopedHeatmap: [[Double]] { memoized("scopedHeatmap") { Self.heatmap(scoped) } }
+    var scopedHeatmap: [[Double]] { memoized("scopedHeatmap") { Self.heatmap(Self.recent(scoped)) } }
+
+    /// The heatmap's window: the last `heatmapDays`.
+    static func recent(_ calls: [Call], now: Date = Date()) -> [Call] {
+        let since = now.addingTimeInterval(-heatmapDays * 86400)
+        return calls.filter { $0.time >= since }
+    }
 
     static func heatmap(_ calls: [Call]) -> [[Double]] {
         var g = Array(repeating: Array(repeating: 0.0, count: 24), count: 7)

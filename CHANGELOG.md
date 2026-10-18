@@ -2,6 +2,10 @@
 
 The latest release is on the [Releases page](https://github.com/msfbeast/reset/releases/latest). Older builds are kept but not listed; this file is the history.
 
+## 0.3.22 — all means all
+
+- The dashboard's All range is now all time: every transcript on disk, not just the last 35 days, labelled "since" your first response. The value multiple for All spreads your plan over the same days. The "When you build" heatmap still shows the last 5 weeks.
+
 ## 0.3.21 — lighter
 
 - Much less memory: about 70 MB instead of 400+. The menu bar pill was being redrawn as a new image every second though its text changes about once a minute; it now redraws only when it changes.

@@ -101,3 +101,27 @@ final class SmallUXTests: XCTestCase {
         XCTAssertEqual(Alerts.testOutcome("Phone push failed: HTTP 403. Will retry"), "Failed: HTTP 403")
     }
 }
+
+/// "All" means all time: everything on disk, with the plan spread from the first response on record.
+final class AllTimeRangeTests: XCTestCase {
+    private let now = Date(timeIntervalSince1970: 1_772_442_000)
+
+    func testAllRunsFromTheFirstResponseOnRecord() {
+        XCTAssertEqual(UsageRange.all.start(now: now), .distantPast, "every response counts, not the last 35 days")
+        XCTAssertEqual(UsageRange.all.days(now: now, first: now.addingTimeInterval(-96 * 86400)), 96, accuracy: 0.001,
+                       "the plan price for All covers the 96 days since the first response")
+        XCTAssertEqual(UsageRange.week.days(now: now, first: now.addingTimeInterval(-96 * 86400)), 7, accuracy: 0.001,
+                       "other ranges ignore it")
+        XCTAssertEqual(UsageRange.all.days(now: now), 1 / 24, accuracy: 0.001, "nothing on record yet")
+    }
+
+    func testTheHeatmapStillCoversFiveWeeks() {
+        func call(_ daysAgo: Double) -> Call {
+            Call(id: UUID().uuidString, time: now.addingTimeInterval(-daysAgo * 86400), model: "claude-opus-5-5", session: "s",
+                 project: "/tmp/p", sidechain: false, input: 0, cw5: 0, cw1h: 0, cacheRead: 0, output: 10, advisorTokens: 0,
+                 tools: 0, mcpServers: [:], webSearches: 0, mcpAttribution: nil, cost: 0, autoStart: false, org: nil)
+        }
+        XCTAssertEqual(UsageStore.recent([call(2), call(34), call(36), call(90)], now: now).count, 2,
+                       "\"last 5 weeks\" stays true now that All reaches further back")
+    }
+}

@@ -77,7 +77,7 @@ struct ShareSheet: View {
         case .week: title = "My AI week"
         // The last 30 days, not the calendar month its name was printed with.
         case .month: title = "My last 30 days with AI"
-        case .all: title = "My last \(Int(UsageStore.historyDays)) days with AI"
+        case .all: title = usage.firstCall.map { "My AI since \($0.formatted(.dateTime.month(.wide).day()))" } ?? "My AI so far"
         }
         var line = AttributedString()
         func part(_ s: String, _ bright: Bool) { var a = AttributedString(s); a.foregroundColor = bright ? .white : Color.white.opacity(0.6); line += a }
@@ -96,7 +96,7 @@ struct ShareSheet: View {
         for c in usage.inRange { byModel[c.model, default: 0] += c.cost }
         let top = byModel.max { $0.value < $1.value }?.key ?? ""
         let topName = top.contains("opus") ? "Opus" : top.contains("sonnet") ? "Sonnet" : top.contains("haiku") ? "Haiku" : top.contains("fable") ? "Fable" : "--"
-        let windows = usage.windows(days: max(1, Int(usage.range.days(now: Date()).rounded(.up))), scoped: true).count
+        let windows = usage.windows(days: max(1, Int(usage.rangeDays.rounded(.up))), scoped: true).count
         return .init(title: title, hero: hero, heroUnit: unit, line: line,
                      stats: [("tokens", Dash.tokens(mix.total)), ("windows", "\(windows)"),
                              ("cache hit", String(format: "%.0f%%", hit * 100)), ("top model", topName)],

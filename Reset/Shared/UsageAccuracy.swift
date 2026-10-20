@@ -5,10 +5,13 @@ import Foundation
 enum UsageAccuracy {
     /// nil when the numbers are solid: live usage, or an exact reset with a known usage reading. Otherwise a
     /// few words on why not, in the order a user would want to fix them.
-    static func reason(isEstimate: Bool, usageKnown: Bool, liveEnabled: Bool, liveWorking: Bool, needsSignIn: Bool) -> String? {
+    static func reason(isEstimate: Bool, usageKnown: Bool, liveEnabled: Bool, liveWorking: Bool, needsSignIn: Bool,
+                       expired: Bool = false) -> String? {
         guard isEstimate || !usageKnown else { return nil }
         if !liveEnabled { return "live usage off" }
         if needsSignIn { return "Claude Code signed out" }
+        // Claude Code renews its own sign-in when it next runs; nothing to sign in to.
+        if expired { return "live again once Claude Code runs in Terminal" }
         if !liveWorking { return "live usage unavailable" }
         // Live usage is on and fine but hasn't answered yet (just switched on, or the first poll after launch).
         return "waiting for live usage"
@@ -34,9 +37,10 @@ enum UsageAccuracy {
 
     /// The line to show: "estimated · live usage off" when the window itself is guessed from activity, or
     /// "usage unknown · …" when the reset is exact (from a limit message) but there's no usage reading.
-    static func note(isEstimate: Bool, usageKnown: Bool, liveEnabled: Bool, liveWorking: Bool, needsSignIn: Bool) -> String? {
+    static func note(isEstimate: Bool, usageKnown: Bool, liveEnabled: Bool, liveWorking: Bool, needsSignIn: Bool,
+                     expired: Bool = false) -> String? {
         guard let why = reason(isEstimate: isEstimate, usageKnown: usageKnown, liveEnabled: liveEnabled,
-                               liveWorking: liveWorking, needsSignIn: needsSignIn) else { return nil }
+                               liveWorking: liveWorking, needsSignIn: needsSignIn, expired: expired) else { return nil }
         return (isEstimate ? "estimated" : "usage unknown") + " · " + why
     }
 }

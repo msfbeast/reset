@@ -460,6 +460,12 @@ final class UsageStore {
 
     /// 5-hour windows over the last `days`, rebuilt from activity the same way the reset estimate is.
     /// `scoped` uses the dashboard's chosen account; each account's windows are its own.
+    /// One account's windows. The terminal's account (`main`) also has those whose sessions never said, as `scope` does.
+    static func windows(_ windows: [UsageWindow], for org: String?, main: Bool, others: Set<String>) -> [UsageWindow] {
+        guard let org else { return windows }
+        return windows.filter { $0.account == org || (main && ($0.account.isEmpty || !others.contains($0.account))) }
+    }
+
     func windows(days: Int = 7, scoped: Bool = false) -> [UsageWindow] {
         memoized("windows \(days) \(scoped)") { findWindows(days: days, scoped: scoped) }
     }

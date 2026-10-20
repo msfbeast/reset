@@ -2,6 +2,11 @@
 
 The latest release is on the [Releases page](https://github.com/msfbeast/reset/releases/latest). Older builds are kept but not listed; this file is the history.
 
+## 0.3.25 — no more daily sign-in prompt
+
+- Claude Code's sign-in in Terminal lasts about 8 hours and renews itself the next time Claude Code runs. If you mostly work in the desktop app it ran out every day, and Reset said "Claude Code is signed out" and asked you to sign in. Now an expired sign-in just pauses live usage ("live again once Claude Code runs in Terminal"); Reset only asks when there's no sign-in at all or Anthropic refuses it.
+- The menu's Today strip shows the windows of the account on the top card. With two accounts, both overlapped in its one row and the count added them up.
+
 ## 0.3.24 — memory stays low
 
 - The menu bar pill is drawn with AppKit instead of SwiftUI's image renderer, which left graphics memory behind for every pill it drew. 0.3.21's fix slowed that down; over a day it still reached about 400 MB. Now it stays near 65 MB.

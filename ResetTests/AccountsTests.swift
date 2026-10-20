@@ -416,3 +416,32 @@ final class AllTimePlanTests: XCTestCase {
         XCTAssertEqual(UsageStore.allTimePlanCost(prices: [("claude-x", 20)], first: [:], now: now), 0, "no responses, nothing charged")
     }
 }
+
+/// An expired Claude Code sign-in renews itself the next time Claude Code runs; Reset doesn't ask to sign in again.
+final class ExpiredSignInTests: XCTestCase {
+    func testAnExpiredSignInIsAPauseNotASignOut() {
+        XCTAssertFalse(LiveClaude.needsSignIn(LiveClaude.expiredMessage), "it asked every day while the desktop app was in use")
+        XCTAssertTrue(LiveClaude.needsSignIn("Claude Code isn't signed in on this Mac, or Keychain access was denied"))
+        XCTAssertTrue(LiveClaude.needsSignIn("Anthropic didn't accept the sign-in (HTTP 401)"))
+        XCTAssertFalse(LiveClaude.needsSignIn("Couldn't reach Anthropic: offline"))
+        XCTAssertEqual(UsageAccuracy.note(isEstimate: true, usageKnown: false, liveEnabled: true, liveWorking: false,
+                                          needsSignIn: false, expired: true),
+                       "estimated · live again once Claude Code runs in Terminal")
+    }
+}
+
+/// The menu's Today strip draws the top card's account, one row with no overlaps.
+final class TodayStripTests: XCTestCase {
+    func testOnlyTheTopCardsAccount() {
+        let t = Date(timeIntervalSince1970: 1_792_200_000)
+        func w(_ h: Double, _ account: String) -> UsageWindow {
+            UsageWindow(start: t.addingTimeInterval(h * 3600), end: t.addingTimeInterval((h + 5) * 3600), autoStart: false, hitLimit: false,
+                        account: account)
+        }
+        let all = [w(0, "team"), w(3, "pro"), w(5, "team"), w(8, "pro"), w(9, "")]
+        XCTAssertEqual(UsageStore.windows(all, for: "pro", main: false, others: ["pro"]).count, 2)
+        XCTAssertEqual(UsageStore.windows(all, for: "team", main: true, others: ["pro"]).count, 3,
+                       "the terminal's account also has the windows whose sessions never said")
+        XCTAssertEqual(UsageStore.windows(all, for: nil, main: true, others: []).count, 5, "one account: all of them")
+    }
+}

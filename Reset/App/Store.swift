@@ -111,7 +111,7 @@ final class Store {
         var working = true
         if case .problem = liveClaude.state { working = false }
         return UsageAccuracy.note(isEstimate: s.isEstimate, usageKnown: s.usedPercent != nil, liveEnabled: liveClaudeEnabled,
-                                  liveWorking: working, needsSignIn: liveClaude.needsSignIn)
+                                  liveWorking: working, needsSignIn: liveClaude.needsSignIn, expired: liveClaude.signInExpired)
     }
 
     let alerts = Alerts()

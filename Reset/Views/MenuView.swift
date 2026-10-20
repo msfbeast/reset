@@ -204,7 +204,10 @@ struct MenuView: View {
     }
 
     private var todayStrip: some View {
-        let wins = store.usage.windows(days: 1)
+        // The top card's account only: with two accounts their windows overlapped in this one row, and the count
+        // added both up.
+        let wins = UsageStore.windows(store.usage.windows(days: 1), for: hero?.account, main: hero?.id == "claude",
+                                      others: Set(store.usage.accounts.filter { $0.id != "claude" }.compactMap(\.org)))
         return VStack(alignment: .leading, spacing: 6) {
             HStack {
                 Text("Today").font(.system(size: 11, weight: .medium)).foregroundStyle(Theme.dim)

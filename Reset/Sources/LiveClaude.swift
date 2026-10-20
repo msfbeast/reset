@@ -93,6 +93,18 @@ final class LiveClaude {
     private(set) var state: State = .off
     /// True when the failure is about Claude Code's sign-in, which the user has to fix (not a network blip).
     private(set) var needsSignIn = false
+    /// Claude Code's sign-in lasts about 8 hours and renews itself the next time Claude Code runs. With most work in
+    /// the desktop app, the terminal's lapses every day; that's a pause, not a reason to sign in again.
+    private(set) var signInExpired = false
+
+    static let expiredMessage = "Claude Code's sign-in has expired; it renews the next time you use Claude Code in Terminal"
+
+    /// Whether a problem needs the user to sign in: no sign-in at all, or Anthropic refusing it. An expired one doesn't.
+    static func needsSignIn(_ problem: String) -> Bool {
+        let w = problem.lowercased()
+        if w.contains("has expired") { return false }
+        return w.contains("sign-in") || w.contains("signed in") || w.contains("didn't accept")
+    }
     /// When the live check started failing, cleared by the next good answer. Agents pacing on the last reading
     /// need to know it's getting old (see the MCP server's usage_as_of).
     private(set) var failingSince: Date?
@@ -160,7 +172,7 @@ final class LiveClaude {
             guard let self else { return }
             // Test hook: `-simulateSignedOut YES` behaves as if Claude Code's sign-in expired.
             if self.source == .claudeCode, UserDefaults.standard.bool(forKey: "simulateSignedOut") {
-                self.finish(.problem("Claude Code's sign-in has expired. Open Claude Code once and it renews itself"), done)
+                self.finish(.problem("Claude Code isn't signed in on this Mac, or Keychain access was denied"), done)
                 return
             }
             let token: Token?
@@ -174,7 +186,7 @@ final class LiveClaude {
                 return
             }
             if let exp = token.expiresAt, exp < Date() {
-                self.finish(.problem(self.source == .claudeCode ? "Claude Code's sign-in has expired. Open Claude Code once and it renews itself"
+                self.finish(.problem(self.source == .claudeCode ? Self.expiredMessage
                                      : "The Claude desktop app's sign-in for this account has expired. Opening the desktop app renews it"), done)
                 return
             }
@@ -258,6 +270,7 @@ final class LiveClaude {
             self.lock.lock(); self.inFlight = false; self.lock.unlock()
             DispatchQueue.main.async {
                 self.needsSignIn = false
+                self.signInExpired = false
                 self.failingSince = nil
                 self.snapshot = snap
                 self.state = snap.fiveHour == nil && snap.sevenDay == nil
@@ -285,6 +298,7 @@ final class LiveClaude {
 
     func reset() {
         needsSignIn = false
+        signInExpired = false
         lock.lock(); lastAttempt = .distantPast; backoffUntil = .distantPast; lock.unlock()
         // Switched off: forget the last reading too, so switching back on never shows something stale.
         persist { $0.lastGood = nil }
@@ -295,11 +309,8 @@ final class LiveClaude {
     private func finish(_ s: State, _ done: @escaping () -> Void) {
         lock.lock(); inFlight = false; lock.unlock()
         // Read by the menu on the main thread, so it's only ever written there.
-        let signIn: Bool? = {
-            guard case .problem(let why) = s else { return nil }
-            let w = why.lowercased()
-            return w.contains("sign-in") || w.contains("signed in") || w.contains("didn't accept")
-        }()
+        let signIn: Bool? = { if case .problem(let why) = s { return Self.needsSignIn(why) } else { return nil } }()
+        let expired: Bool = { if case .problem(let why) = s { return why.lowercased().contains("has expired") } else { return false } }()
         if case .problem(let why) = s, source == .claudeCode {
             let diag: [String: Any] = ["fetched": ISO8601DateFormatter().string(from: Date()), "problem": why]
             if let d = try? JSONSerialization.data(withJSONObject: diag, options: .prettyPrinted) {
@@ -308,6 +319,7 @@ final class LiveClaude {
         }
         DispatchQueue.main.async {
             if let signIn { self.needsSignIn = signIn }
+            self.signInExpired = expired
             self.state = s
             if case .problem = s { self.failingSince = self.failingSince ?? Date() }
             done()

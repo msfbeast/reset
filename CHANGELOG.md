@@ -2,6 +2,10 @@
 
 The latest release is on the [Releases page](https://github.com/msfbeast/reset/releases/latest). Older builds are kept but not listed; this file is the history.
 
+## 0.3.24 — memory stays low
+
+- The menu bar pill is drawn with AppKit instead of SwiftUI's image renderer, which left graphics memory behind for every pill it drew. 0.3.21's fix slowed that down; over a day it still reached about 400 MB. Now it stays near 65 MB.
+
 ## 0.3.23 — accurate numbers
 
 - The Claude desktop app's own sessions are counted (they sit in a hidden folder and were skipped).

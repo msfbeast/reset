@@ -181,29 +181,58 @@ enum MenuBarPill {
         return img
     }
 
+    /// Drawn with AppKit, as a vector image the menu bar renders when it needs it. SwiftUI's ImageRenderer left
+    /// GPU-backed memory behind for every pill it drew; even once a minute that added up to 260 MB over a day.
     @MainActor private static func draw(_ g: MenuBarGlance, scale: CGFloat) -> NSImage? {
-        let (fill, ink) = colors(g.tone)
-        let view = HStack(spacing: 3) {
-            if g.warning { Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 9.5, weight: .bold)) }
-            if let detail = g.detail {
-                // Both limits, one above the other, small enough to fit the menu bar's height.
-                VStack(alignment: .leading, spacing: -1) {
-                    Text(g.text).font(.system(size: 9, weight: .bold).monospacedDigit())
-                    // Softer than the session line, except on red, where white needs all the contrast it has.
-                    Text(detail).font(.system(size: 9, weight: .semibold).monospacedDigit()).opacity(ink == .white ? 1 : 0.75)
-                }
-            } else {
-                Text(g.text).font(.system(size: 12, weight: .semibold).monospacedDigit())
-            }
+        let (fillColor, inkColor) = colors(g.tone)
+        let fill = NSColor(fillColor), ink = g.tone == .blocked ? NSColor.labelColor : NSColor(inkColor)
+        let twoLines = g.detail != nil
+        let paddingX: CGFloat = twoLines ? 6 : 7, height: CGFloat = twoLines ? 21 : 17, radius: CGFloat = twoLines ? 6 : 8.5
+
+        func attributed(_ text: String, size: CGFloat, weight: NSFont.Weight, alpha: CGFloat = 1) -> NSAttributedString {
+            NSAttributedString(string: text, attributes: [.font: NSFont.monospacedDigitSystemFont(ofSize: size, weight: weight),
+                                                          .foregroundColor: ink.withAlphaComponent(alpha)])
         }
-        .foregroundColor(ink)
-        .padding(.horizontal, g.detail == nil ? 7 : 6)
-        .frame(height: g.detail == nil ? 17 : 21)
-        .background(RoundedRectangle(cornerRadius: g.detail == nil ? 8.5 : 6, style: .continuous).fill(fill))
-        .fixedSize()
-        let r = ImageRenderer(content: view)
-        r.scale = scale
-        guard let img = r.nsImage else { return nil }
+        let lines: [NSAttributedString] = twoLines
+            // Softer than the session line, except on red, where white needs all the contrast it has.
+            ? [attributed(g.text, size: 9, weight: .bold), attributed(g.detail ?? "", size: 9, weight: .semibold, alpha: inkColor == .white ? 1 : 0.75)]
+            : [attributed(g.text, size: 12, weight: .semibold)]
+        let textWidth = lines.map { ceil($0.size().width) }.max() ?? 0
+        // Tinted over its own shape, so the "!" stays cut out; a palette colour filled the whole triangle.
+        let icon: NSImage? = g.warning
+            ? NSImage(systemSymbolName: "exclamationmark.triangle.fill", accessibilityDescription: nil)?
+                .withSymbolConfiguration(.init(pointSize: 9.5, weight: .bold))
+                .map { symbol in
+                    NSImage(size: symbol.size, flipped: false) { r in
+                        symbol.draw(in: r)
+                        ink.set()
+                        r.fill(using: .sourceAtop)
+                        return true
+                    }
+                }
+            : nil
+        let iconWidth = icon.map { ceil($0.size.width) + 3 } ?? 0
+        let size = NSSize(width: paddingX * 2 + iconWidth + textWidth, height: height)
+
+        let img = NSImage(size: size, flipped: false) { rect in
+            fill.setFill()
+            NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius).fill()
+            var x = paddingX
+            if let icon {
+                icon.draw(in: NSRect(x: x, y: (rect.height - icon.size.height) / 2, width: icon.size.width, height: icon.size.height))
+                x += iconWidth
+            }
+            // Lines stacked from the top, centred together as a block, one point tighter than their natural spacing.
+            let heights = lines.map { $0.size().height }
+            let block = heights.reduce(0, +) - CGFloat(lines.count - 1)
+            var y = (rect.height + block) / 2
+            for (line, h) in zip(lines, heights) {
+                y -= h
+                line.draw(at: NSPoint(x: x, y: y))
+                y += 1
+            }
+            return true
+        }
         img.isTemplate = false
         return img
     }

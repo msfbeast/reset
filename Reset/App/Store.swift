@@ -145,7 +145,7 @@ final class Store {
         phoneEnabled = d.bool(forKey: "phoneEnabled")
         ntfyServer = d.string(forKey: "ntfyServer") ?? "https://ntfy.sh"
         ntfyTopic = d.string(forKey: "ntfyTopic") ?? ""
-        commands = Self.load("commands") ?? Kicker.defaultCommands()
+        commands = Self.load("commands").map(Kicker.upgraded) ?? Kicker.defaultCommands()
         liveClaudeEnabled = d.bool(forKey: "liveClaude")
         desktopAccountsEnabled = d.bool(forKey: "liveClaudeDesktop")
         if prefs["antigravity"] == nil {

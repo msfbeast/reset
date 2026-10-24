@@ -145,8 +145,8 @@ final class ClaudeUsageScanner {
             if let d = try? Data(contentsOf: cacheURL), let c = try? JSONDecoder().decode([String: FileResult].self, from: d) { cache = c }
         }
         let home = FileManager.default.homeDirectoryForCurrentUser
-        let roots = [home.appendingPathComponent(".claude/projects"),
-                     home.appendingPathComponent("Library/Application Support/Claude/local-agent-mode-sessions")]
+        let roots = [home.appendingPathComponent(".claude/projects")]
+            + Self.desktopProjectRoots(home.appendingPathComponent("Library/Application Support/Claude/local-agent-mode-sessions"))
         var seen: Set<String> = []
         var changed = false
         var results: [FileResult] = []
@@ -160,11 +160,8 @@ final class ClaudeUsageScanner {
             return r
         }
         for root in roots {
-            // The Claude desktop app keeps each session's transcripts under a hidden ".claude" folder, so skipping
-            // hidden files there skipped every one of them.
-            let desktop = root.path.contains("local-agent-mode-sessions")
             guard let e = FileManager.default.enumerator(at: root, includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey],
-                                                         options: desktop ? [] : [.skipsHiddenFiles]) else { continue }
+                                                         options: [.skipsHiddenFiles]) else { continue }
             for case let url as URL in e where url.pathExtension == "jsonl" && url.lastPathComponent != "audit.jsonl" {
                 let rv = try? url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
                 guard let mod = rv?.contentModificationDate, mod >= since else { continue }
@@ -223,6 +220,26 @@ final class ClaudeUsageScanner {
         var r = Self.combine(results, since: since)
         r.format = Self.formatReport(results, recentSince: Date().addingTimeInterval(-Self.recentWindow))
         return r
+    }
+
+    /// Where the Claude desktop app keeps its sessions' transcripts: <install>/<organization>/local_<session>/.claude/
+    /// projects, or the same under an "agent" folder. Only those are walked; the rest of the folder is each session's
+    /// working files (node_modules, outputs: 447 MB here), which a walk of the whole tree read on every scan.
+    static func desktopProjectRoots(_ root: URL) -> [URL] {
+        let fm = FileManager.default
+        func children(_ u: URL) -> [URL] {
+            (try? fm.contentsOfDirectory(at: u, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])) ?? []
+        }
+        var out: [URL] = []
+        for install in children(root) {
+            for org in children(install) {
+                for session in children(org) + children(org.appendingPathComponent("agent")) where session.lastPathComponent.hasPrefix("local_") {
+                    let projects = session.appendingPathComponent(".claude/projects")
+                    if fm.fileExists(atPath: projects.path) { out.append(projects) }
+                }
+            }
+        }
+        return out
     }
 
     /// The account a Claude desktop app session belongs to, from its folder:

@@ -2,6 +2,11 @@
 
 The latest release is on the [Releases page](https://github.com/msfbeast/reset/releases/latest). Older builds are kept but not listed; this file is the history.
 
+## 0.3.26 — quieter auto-start, lighter scans
+
+- Auto-start runs Claude Code with hooks switched off. Its one-word run used to fire every hook from your settings and plugins, and macOS charged whatever they touched to Reset (which is how Reset came to ask for Apple Music access). It still uses Claude Code's own sign-in, so the window opens as before.
+- Reset reads only the Claude desktop app's transcript folders, not each session's working files: 62 files instead of 7,333 on this Mac, same 55 transcripts.
+
 ## 0.3.25 — no more daily sign-in prompt
 
 - Claude Code's sign-in in Terminal lasts about 8 hours and renews itself the next time Claude Code runs. If you mostly work in the desktop app it ran out every day, and Reset said "Claude Code is signed out" and asked you to sign in. Now an expired sign-in just pauses live usage ("live again once Claude Code runs in Terminal"); Reset only asks when there's no sign-in at all or Anthropic refuses it.

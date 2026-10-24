@@ -74,6 +74,18 @@ final class Kicker {
     /// How long a run may take before it's stopped and counted as timed out. Tests shorten it.
     var timeLimit: TimeInterval = 180
 
+    /// Settings for a kick run that switch every hook off while keeping Claude Code's own sign-in (`--bare` skips
+    /// hooks too, but then only an API key works, so a kick wouldn't open the subscription's window).
+    static let noHooks = #"--settings '{"disableAllHooks":true}'"#
+
+    /// A saved Claude command from before kicks skipped hooks gets the flag added, unless the user changed it into
+    /// something else.
+    static func upgraded(_ commands: [String: String]) -> [String: String] {
+        var out = commands
+        if let c = out["claude"], c.hasSuffix("--strict-mcp-config"), !c.contains("disableAllHooks") { out["claude"] = c + " " + noHooks }
+        return out
+    }
+
     static func defaultCommands() -> [String: String] {
         let home = NSHomeDirectory()
         func firstExisting(_ paths: [String]) -> String? {
@@ -87,7 +99,9 @@ final class Kicker {
         return [
             // No tools and no MCP servers: the kick only needs one API call to open the window. It must
             // still write a transcript (no --no-session-persistence), because that is how Reset sees it.
-            "claude": "\(claude) -p \"hi\" --model haiku --tools \"\" --strict-mcp-config",
+            // No hooks either (yours or plugins'): a one-word kick has nothing for them to do, and anything they
+            // touch is charged to Reset by macOS, which is how Reset came to ask for Apple Music access.
+            "claude": "\(claude) -p \"hi\" --model haiku --tools \"\" --strict-mcp-config " + Self.noHooks,
             "codex": "\(codex) exec --skip-git-repo-check \"hi\"",
         ]
     }

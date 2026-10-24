@@ -15,6 +15,20 @@ final class AccuracyBatchTests: XCTestCase {
         XCTAssertNil(ClaudeUsageScanner.desktopOrg("/a/local-agent-mode-sessions/install/not-an-org/x.jsonl"))
     }
 
+    func testOnlyTheDesktopAppsTranscriptFoldersAreWalked() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let org = root.appendingPathComponent("install/6ac79bdb-beee-4e0e-91af-d8977a22ec44")
+        for dir in ["local_a/.claude/projects/p", "agent/local_b/.claude/projects/p", "local_c/outputs/node_modules/x"] {
+            try FileManager.default.createDirectory(at: org.appendingPathComponent(dir), withIntermediateDirectories: true)
+        }
+        // Compared by their ends: the temporary folder shows up as both /var/… and /private/var/….
+        let roots = ClaudeUsageScanner.desktopProjectRoots(root).map(\.path)
+        XCTAssertEqual(roots.count, 2, "no outputs or node_modules")
+        XCTAssertTrue(roots.contains { $0.hasSuffix("/local_a/.claude/projects") })
+        XCTAssertTrue(roots.contains { $0.hasSuffix("/agent/local_b/.claude/projects") })
+    }
+
     private func samples(_ rows: [(minutesFromNow: Double, fiveHour: Double)]) -> [PlanUsageLog.Sample] {
         rows.map { .init(time: now.addingTimeInterval($0.minutesFromNow * 60), fiveHour: $0.fiveHour, sevenDay: nil) }
     }

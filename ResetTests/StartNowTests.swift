@@ -37,6 +37,15 @@ final class StartNowTests: XCTestCase {
                        "a window is already running")
     }
 
+    func testAutoStartRunsWithoutHooks() {
+        XCTAssertTrue(Kicker.defaultCommands()["claude"]?.contains(#"--settings '{"disableAllHooks":true}'"#) == true)
+        let old = ["claude": #""/x/claude" -p "hi" --model haiku --tools "" --strict-mcp-config"#, "codex": "codex exec hi"]
+        XCTAssertTrue(Kicker.upgraded(old)["claude"]?.hasSuffix(Kicker.noHooks) == true, "a saved default gets it")
+        XCTAssertEqual(Kicker.upgraded(Kicker.upgraded(old)), Kicker.upgraded(old), "only once")
+        XCTAssertEqual(Kicker.upgraded(["claude": "my own script"])["claude"], "my own script", "a custom command is left alone")
+        XCTAssertEqual(Kicker.upgraded(old)["codex"], "codex exec hi")
+    }
+
     func testRequestPostedByTheWidgetReachesTheListener() {
         // A made-up provider name, so the app's real listener (for "claude") never hears it.
         let provider = "test-\(UUID().uuidString)"

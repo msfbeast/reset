@@ -137,12 +137,20 @@ final class UsageStore {
     func refresh() {
         if Demo.isOn {
             let d = Demo.calls()
-            load(calls: d.calls, titles: d.titles, limitHits: d.limitHits, apiMillis: d.api)
+            load(calls: d.calls, titles: d.titles, limitHits: d.limitHits, apiMillis: d.api, failedTools: d.failed)
             lastScan = Date()
             if let path = UserDefaults.standard.string(forKey: "renderShareCard") {
                 DispatchQueue.main.async {
                     if let img = ShareSheet.render(ShareSheet.model(self, mascot: true)), let t = img.tiffRepresentation,
                        let png = NSBitmapImageRep(data: t)?.representation(using: .png, properties: [:]) {
+                        try? png.write(to: URL(fileURLWithPath: path))
+                    }
+                }
+            }
+            if let path = UserDefaults.standard.string(forKey: "renderWasteCard") {
+                DispatchQueue.main.async {
+                    let r = ImageRenderer(content: WasteCardView(m: ShareSheet.wasteModel(self))); r.scale = 2
+                    if let t = r.nsImage?.tiffRepresentation, let png = NSBitmapImageRep(data: t)?.representation(using: .png, properties: [:]) {
                         try? png.write(to: URL(fileURLWithPath: path))
                     }
                 }

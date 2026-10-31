@@ -19,9 +19,13 @@ enum Demo {
         ("/Users/demo/Developer/cli-tool", "CLI release script", 0.2),
     ]
 
-    static func calls(now: Date = Date()) -> (calls: [Call], titles: [String: String], limitHits: [Date], api: [String: Int]) {
+    /// Sessions behave like real ones, so "where your window went" looks right in screenshots: context grows turn by
+    /// turn, a few long breaks a session make it re-read, now and then a model switch rebuilds it mid-session, and
+    /// once in a while a command fails a few times in a row. Subagents run in their own threads with small contexts.
+    static func calls(now: Date = Date()) -> (calls: [Call], titles: [String: String], limitHits: [Date], api: [String: Int], failed: Set<String>) {
         var rng = SeededRandom(seed: 42)
         var calls: [Call] = [], titles: [String: String] = [:], hits: [Date] = [], api: [String: Int] = [:]
+        var failed: Set<String> = []
         let cal = Calendar.current
         for dayBack in stride(from: 29, through: 0, by: -1) {
             let day = cal.startOfDay(for: now.addingTimeInterval(-Double(dayBack) * 86400))
@@ -34,24 +38,46 @@ enum Demo {
                 let startHour = [10.0, 13.5, 16.0, 21.5, 23.0][Int(rng.next() * 5) % 5] + rng.next()
                 var t = day.addingTimeInterval(startHour * 3600)
                 let n = 120 + Int(rng.next() * 900 * p.2)
+                let breaks = Set((0..<(1 + Int(rng.next() * 3))).map { _ in 30 + Int(rng.next() * Double(max(1, n - 40))) })
+                let bustAt = rng.next() < 0.3 ? 20 + Int(rng.next() * Double(max(1, n - 30))) : -1
+                let loopAt = rng.next() < 0.2 ? 10 + Int(rng.next() * Double(max(1, n - 20))) : -1
+                var context = 25_000 + Int(rng.next() * 20_000), subagent = 0
+                var model = "claude-opus-5-5"
                 for k in 0..<n {
-                    t = t.addingTimeInterval(20 + rng.next() * 70)
+                    let gap = breaks.contains(k) ? 3600 * (1.2 + rng.next() * 1.5) : 20 + rng.next() * 70
+                    t = t.addingTimeInterval(gap)
                     if t > now { break }
-                    let model = rng.next() < 0.85 ? "claude-opus-5-5" : "claude-sonnet-5-5"
-                    let cr = Int(60_000 + rng.next() * 220_000), out = Int(200 + rng.next() * 2400)
-                    let cw = k % 12 == 0 ? Int(8_000 + rng.next() * 40_000) : 0
-                    let cost = Pricing.claude(model).map { Pricing.cost($0, input: 3, cw5: 0, cw1h: cw, cacheRead: cr, output: out) } ?? 0
+                    let side = rng.next() < 0.18
+                    var cr: Int, cw: Int, m = model
+                    if side {
+                        m = rng.next() < 0.5 ? "claude-sonnet-5-5" : "claude-opus-5-5"
+                        cr = subagent; cw = Int(1_000 + rng.next() * 6_000); subagent = min(cr + cw, 60_000)
+                    } else {
+                        if k == bustAt { model = "claude-sonnet-5-5"; m = model }
+                        if gap > 3600 { cr = 0; cw = context }                                  // back after the cache expired
+                        else if k == bustAt { cr = context / 6; cw = context - cr }               // a switch rebuilds it
+                        else { cr = context; cw = rng.next() < 0.06 ? Int(12_000 + rng.next() * 30_000) : Int(150 + rng.next() * 1_200) }
+                        context = min(cr + cw, 420_000)
+                    }
+                    let out = Int(200 + rng.next() * 2400)
+                    let cost = Pricing.claude(m).map { Pricing.cost($0, input: 3, cw5: 0, cw1h: cw, cacheRead: cr, output: out) } ?? 0
                     let mcp: [String: Int] = rng.next() < 0.08 ? [["github", "figma", "linear"][Int(rng.next() * 3) % 3]: 1] : [:]
-                    calls.append(Call(id: "\(id)-\(k)", time: t, model: model, session: id, project: p.0, sidechain: rng.next() < 0.22,
+                    let callId = "\(id)-\(k)"
+                    var uses: [Call.ToolUse]? = rng.next() < 0.6 ? [.init(id: "\(callId)-t", name: ["Read", "Edit", "Bash", "Grep"][Int(rng.next() * 4) % 4])] : nil
+                    if loopAt >= 0, !side, (loopAt..<loopAt + 4).contains(k) {
+                        uses = [.init(id: "\(callId)-t", name: "Bash")]; failed.insert("\(callId)-t")
+                    }
+                    calls.append(Call(id: callId, time: t, model: m, session: id, project: p.0, sidechain: side,
                                       input: 3, cw5: 0, cw1h: cw, cacheRead: cr, output: out, advisorTokens: 0,
-                                      tools: rng.next() < 0.6 ? 1 : 0, mcpServers: mcp, webSearches: rng.next() < 0.02 ? 1 : 0,
-                                      mcpAttribution: mcp.keys.first, cost: cost, autoStart: k == 0 && rng.next() < 0.15))
+                                      tools: uses?.count ?? 0, mcpServers: mcp, webSearches: rng.next() < 0.02 ? 1 : 0,
+                                      mcpAttribution: mcp.keys.first, cost: cost, autoStart: k == 0 && rng.next() < 0.15,
+                                      thread: side ? "\(id)-agent.jsonl" : "\(id).jsonl", toolUses: uses))
                 }
                 api[id] = Int(Double(n) * 9_000)
             }
             if rng.next() < 0.25 && dayBack > 0 { hits.append(day.addingTimeInterval(17 * 3600)) }
         }
-        return (calls.sorted { $0.time < $1.time }, titles, hits, api)
+        return (calls.sorted { $0.time < $1.time }, titles, hits, api, failed)
     }
 
     static func claude(now: Date = Date()) -> WindowStatus {

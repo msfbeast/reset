@@ -192,6 +192,7 @@ final class Store {
         // The MCP server sets budgets from another process; a 5-second look keeps the dashboard current.
         if now.timeIntervalSince(lastBudgetLook) >= 5 { lastBudgetLook = now; reloadBudget() }
         runAutoStarts()
+        checkBreakGuard()
     }
 
     // MARK: Pacing budget
@@ -308,8 +309,46 @@ final class Store {
     /// What the menu bar shows right now (see MenuBarGlance).
     var glance: MenuBarGlance? {
         let p = MenuBarGlance.pick(barCandidates, main: activeClaudeId, now: now)
-        return MenuBarGlance.make(ready: p.ready, soonest: p.soonest, blocked: p.blocked, runsOutAt: runsOut,
-                                  signedOut: liveNeedsSignIn, limits: limitsShown, now: now)
+        var g = MenuBarGlance.make(ready: p.ready, soonest: p.soonest, blocked: p.blocked, runsOutAt: runsOut,
+                                   signedOut: liveNeedsSignIn, limits: limitsShown, now: now)
+        if var gl = g, let w = guarded, case let left = w.expiresAt.timeIntervalSince(now), left <= BreakGuard.menuBarFor {
+            let m = max(1, Int((left / 60).rounded(.up)))
+            gl.cacheMinutes = m
+            gl.spoken += "; a big session's cache expires in \(m) minute\(m == 1 ? "" : "s")"
+            g = gl
+        }
+        return g
+    }
+
+    // MARK: Break Guard
+
+    /// Warn before a big session's cache expires (see BreakGuard). On unless switched off in Settings.
+    var breakGuardEnabled: Bool = UserDefaults.standard.object(forKey: "breakGuard") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(breakGuardEnabled, forKey: "breakGuard") }
+    }
+
+    /// The big warm session to mention: the one expiring soonest that's been idle long enough not to be noise.
+    var guarded: BreakGuard.Warm? {
+        guard breakGuardEnabled, !Demo.isOn else { return nil }
+        return usage.warmSessions.first { now.timeIntervalSince($0.lastActivity) >= BreakGuard.quietFor && $0.expiresAt > now }
+    }
+
+    private func checkBreakGuard() {
+        guard let w = guarded else { return }
+        let left = w.expiresAt.timeIntervalSince(now)
+        // Near the end, read transcripts every minute rather than every 5, so a session that's back in use drops out.
+        if left <= BreakGuard.menuBarFor + 60, now.timeIntervalSince(usage.lastScan ?? .distantPast) >= 60 { usage.refresh() }
+        guard left <= BreakGuard.warnBefore else { return }
+        // Once per session and expiry.
+        let key = "\(w.session)|\(Alerts.minuteKey(w.expiresAt))"
+        guard UserDefaults.standard.string(forKey: "breakGuardWarned") != key else { return }
+        UserDefaults.standard.set(key, forKey: "breakGuardWarned")
+        let name = usage.titles[w.session].map { "“\($0)”" } ?? "Your big session"
+        let title = "\(name): cache expires in \(max(1, Int((left / 60).rounded()))) min"
+        let body = "Leaving for a while? /compact now costs about \(Dash.money(w.compactUSD)); coming back after it expires re-reads it for about \(Dash.money(w.comeBackUSD)). After a long break, start fresh."
+        alerts.notifyNow(title: title, body: body, id: "break-guard")
+        if phoneEnabled { alerts.pushNow(title: title, body: body, server: ntfyServer, topic: ntfyTopic, log: note) }
+        note("Break Guard: \(name) expires \(Fmt.clock.string(from: w.expiresAt))")
     }
 
     /// A tracked provider with a fresh window waiting, shown in the bar ahead of any countdown.
@@ -603,6 +642,20 @@ final class Store {
             return (a.name, ["cost": (mine.reduce(0) { $0 + $1.cost } * 100).rounded() / 100, "responses": mine.count,
                              "first": d(mine.first?.time)] as [String: Any])
         })
+        // Where the window went, last 30 days and all time, for checking against the transcripts.
+        func wasteSummary(_ since: Date) -> [String: Any] {
+            let r = Waste.analyze(usage.calls, since: since, failed: usage.failedTools, compactions: usage.compactions)
+            var o: [String: Any] = ["spend": (r.spend * 100).rounded() / 100, "total": (r.total * 100).rounded() / 100,
+                                    "share": (r.share * 1000).rounded() / 10]
+            for b in r.buckets { o[b.kind.rawValue] = ["usd": (b.usd * 100).rounded() / 100, "count": b.count, "tokens": b.tokens] }
+            return o
+        }
+        out["waste"] = ["last30Days": wasteSummary(Date().addingTimeInterval(-30 * 86400)), "allTime": wasteSummary(.distantPast)]
+        out["breakGuard"] = ["enabled": breakGuardEnabled, "warm": usage.warmSessions.prefix(5).map { w in
+            ["session": String(w.session.prefix(8)), "title": usage.titles[w.session] ?? NSNull(), "contextTokens": w.context,
+             "idleMinutes": Int(Date().timeIntervalSince(w.lastActivity) / 60), "expiresAt": d(w.expiresAt),
+             "comeBackUSD": (w.comeBackUSD * 100).rounded() / 100, "compactUSD": (w.compactUSD * 100).rounded() / 100] as [String: Any]
+        }, "guarded": guarded.map { String($0.session.prefix(8)) } ?? NSNull()]
         out["usageAllTime"] = ["cost": (usage.calls.reduce(0) { $0 + $1.cost } * 100).rounded() / 100, "responses": usage.calls.count]
         let hits = liveClaude.limitHits
         let dayAgo = Date().addingTimeInterval(-86400)
@@ -890,6 +943,11 @@ final class Store {
         snap.monthDays = mdays.map { ($0 * 100).rounded() / 100 }
         snap.claudeRunsOutAt = runsOut
         snap.startingAt = widgetStarting["claude"]
+        let w = Waste.analyze(usage.calls, since: Date().addingTimeInterval(-30 * 86400), failed: usage.failedTools, compactions: usage.compactions)
+        func cents(_ x: Double) -> Double { (x * 100).rounded() / 100 }
+        snap.waste = .init(days: 30, spendUSD: cents(w.spend), totalUSD: cents(w.total), share: (w.share * 1000).rounded() / 1000,
+                           buckets: w.buckets.map { .init(kind: $0.kind.rawValue, title: $0.kind.title, usd: cents($0.usd), count: $0.count,
+                                                          tip: $0.kind.tip, inTotal: $0.kind != .overkill) })
         snap.limitDays = Array(Set(usage.limitHits.filter { $0 >= monthStart }.map { cal.component(.day, from: $0) })).sorted()
 
         let enc = JSONEncoder(); enc.outputFormatting = .sortedKeys

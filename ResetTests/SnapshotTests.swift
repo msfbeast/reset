@@ -65,6 +65,7 @@ final class SnapshotTests: XCTestCase {
             ("pill-running-out", MenuBarGlance(tone: .runningOut, text: "86% · out 9:29")),
             ("pill-ready", MenuBarGlance(tone: .ready, text: "ready")),
             ("pill-signed-out", MenuBarGlance(tone: .normal, text: "2:46", warning: true)),
+            ("pill-break-guard", MenuBarGlance(tone: .normal, text: "2:46 · 42%", cacheMinutes: 14)),
             ("pill-both", MenuBarGlance(tone: .normal, text: "2:46 · 42%", detail: "wk 3d · 60%")),
             ("pill-both-low", MenuBarGlance(tone: .low, text: "1:00 · 90%", detail: "wk 18h · 9%")),
         ]

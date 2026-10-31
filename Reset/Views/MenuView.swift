@@ -164,6 +164,16 @@ struct MenuView: View {
                 .font(.system(size: 11)).foregroundStyle(Theme.dim).lineLimit(2)
         }
         if let sec = h.secondary { LimitLine(limit: sec, now: store.now) }
+        // Break Guard: a big session going quiet, while compacting it is still cheap.
+        if let w = store.guarded {
+            let left = max(1, Int((w.expiresAt.timeIntervalSince(store.now) / 60).rounded(.up)))
+            let name = store.usage.titles[w.session] ?? "A big session"
+            Label("\(name): cache warm for \(left) more min. Leaving? /compact first (about \(Dash.money(w.compactUSD)) now, \(Dash.money(w.comeBackUSD)) after)",
+                  systemImage: "hourglass")
+                .font(.system(size: 11, weight: left <= 15 ? .medium : .regular))
+                .foregroundStyle(left <= 15 ? Color(hex: 0xFFB13D) : Theme.dim).lineLimit(2)
+                .help("Coming back after the cache expires re-reads the whole session at full price. After a long break, start fresh, don't resume.")
+        }
     }
 
     /// The pacing budget an agent set through reset-mcp. Coloured once it needs attention; clearing it lives on the dashboard.

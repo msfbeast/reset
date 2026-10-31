@@ -2,6 +2,12 @@
 
 The latest release is on the [Releases page](https://github.com/msfbeast/reset/releases/latest). Older builds are kept but not listed; this file is the history.
 
+## 0.3.27 — where your window went
+
+- A dashboard card showing how much of your usage re-did work it didn't need to (breaks, busts, loops), each with a tip and the sessions it came from, plus a "where it went" share card and a `get_waste_report` MCP tool.
+- Break Guard: when a big session goes quiet, the menu says how long its cache stays warm and what compacting costs now against re-reading it later; the menu bar counts down the last 15 minutes, and a heads-up reaches your phone before it expires.
+- The first launch re-reads your transcripts once.
+
 ## 0.3.26 — quieter auto-start, lighter scans
 
 - Auto-start runs Claude Code with hooks switched off. Its one-word run used to fire every hook from your settings and plugins, and macOS charged whatever they touched to Reset (which is how Reset came to ask for Apple Music access). It still uses Claude Code's own sign-in, so the window opens as before.

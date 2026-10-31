@@ -72,6 +72,9 @@ final class UsageStore {
     private(set) var limitHits: [Date] = []
     /// Exact 5-hour resets from "limit reached" rows, with their account.
     private(set) var limitResets: [ClaudeUsageScanner.LimitReset] = []
+    /// For Waste: tool calls that failed, and when each transcript was compacted.
+    private(set) var failedTools: Set<String> = []
+    private(set) var compactions: [String: [Date]] = [:]
     private(set) var apiMillis: [String: Int] = [:]
     /// Whether Claude Code's recent logs still read cleanly; Settings warns when they don't.
     private(set) var format = ClaudeUsageScanner.FormatReport()
@@ -168,10 +171,18 @@ final class UsageStore {
             guard let self else { return }
             let r = self.scanner.scan(since: since)
             DispatchQueue.main.async {
-                self.load(calls: r.calls, titles: r.titles, limitHits: r.limitHits, apiMillis: r.apiMillis, resets: r.resets)
+                self.load(calls: r.calls, titles: r.titles, limitHits: r.limitHits, apiMillis: r.apiMillis, resets: r.resets,
+                          failedTools: r.failedTools, compactions: r.compactions)
                 self.format = Self.simulatedFormat ?? r.format
                 self.loading = false
                 self.lastScan = Date()
+                // Test hook: `--args -renderWasteCard /path/card.png` writes the "where it went" card once.
+                if let path = UserDefaults.standard.string(forKey: "renderWasteCard") {
+                    let r = ImageRenderer(content: WasteCardView(m: ShareSheet.wasteModel(self))); r.scale = 2
+                    if let tiff = r.nsImage?.tiffRepresentation, let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]) {
+                        try? png.write(to: URL(fileURLWithPath: path))
+                    }
+                }
                 // Test hook: `--args -renderShareCard /path/card.png` writes the current card once.
                 if let path = UserDefaults.standard.string(forKey: "renderShareCard"),
                    let img = ShareSheet.render(ShareSheet.model(self, mascot: true)),
@@ -185,11 +196,13 @@ final class UsageStore {
 
     /// Takes a scan's results (or demo mode's, or a test's).
     func load(calls: [Call], titles: [String: String] = [:], limitHits: [Date] = [], apiMillis: [String: Int] = [:],
-              resets: [ClaudeUsageScanner.LimitReset] = []) {
+              resets: [ClaudeUsageScanner.LimitReset] = [], failedTools: Set<String> = [], compactions: [String: [Date]] = [:]) {
         self.calls = calls
         self.titles = titles
         self.limitHits = limitHits
         self.limitResets = resets
+        self.failedTools = failedTools
+        self.compactions = compactions
         self.apiMillis = apiMillis
         inputs += 1
     }
@@ -270,6 +283,14 @@ final class UsageStore {
     }
 
     var totalCost: Double { memoized("totalCost") { inRange.reduce(0) { $0 + $1.cost } } }
+
+    /// Big sessions whose cache is still warm (see BreakGuard), every account. Worked out once a minute at most.
+    var warmSessions: [BreakGuard.Warm] { memoized("warm") { BreakGuard.warm(calls, now: Date()) } }
+
+    /// Where the chosen range's usage went (see Waste), for the chosen account.
+    var waste: Waste.Report {
+        memoized("waste") { Waste.analyze(scoped, since: range.start(now: Date()), failed: failedTools, compactions: compactions) }
+    }
 
     /// Every account's spend today and over the last 7 days, for the menu and Claude Code's status line.
     var todayCost: Double {

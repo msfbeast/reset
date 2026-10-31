@@ -22,6 +22,14 @@ struct Call: Codable {
     var autoStart: Bool
     /// The Claude organization (account) the session ran under, when its transcript says. Optional for old caches.
     var org: String? = nil
+    /// The transcript file it came from (its name), so a session's main thread and each subagent are separate
+    /// chains when working out cache breaks and busts. Optional for old caches.
+    var thread: String? = nil
+    /// The tools this response called, by id and name, for spotting the same tool failing again and again. Never
+    /// their inputs or results. Optional for old caches.
+    var toolUses: [ToolUse]? = nil
+
+    struct ToolUse: Codable, Equatable { var id: String; var name: String }
 
     var totalTokens: Int { input + cw5 + cw1h + cacheRead + output + advisorTokens }
     var mcpCalls: Int { mcpServers.values.reduce(0, +) }
@@ -53,6 +61,10 @@ final class ClaudeUsageScanner {
         /// Claude Code's "limit reached" rows: when each was seen and the exact reset it named. Optional so older
         /// caches decode.
         var resets: [LimitReset]?
+        /// Ids of tool calls whose result was an error (a refusal by the user doesn't count). Optional for old caches.
+        var failedTools: [String]?
+        /// When the conversation was compacted: its context is rebuilt then on purpose, which isn't a cache bust.
+        var compactions: [Date]?
     }
 
     /// An exact 5-hour reset from a "limit reached" row, and the account it was for (stamped when combining).
@@ -112,9 +124,9 @@ final class ClaudeUsageScanner {
         // v3: cache writes on multi-iteration responses are counted in full; cached numbers from v2 would keep the gap.
         try? FileManager.default.removeItem(at: dir.appendingPathComponent("claude-usage-cache-v2.json"))
         try? FileManager.default.removeItem(at: dir.appendingPathComponent("claude-usage-cache-v3.json"))
-        try? FileManager.default.removeItem(at: dir.appendingPathComponent("claude-usage-cache-v4.json"))
-        // v5: also each "limit reached" row's exact reset, and only refused requests count as limit hits.
-        return dir.appendingPathComponent("claude-usage-cache-v5.json")
+        for old in 4...5 { try? FileManager.default.removeItem(at: dir.appendingPathComponent("claude-usage-cache-v\(old).json")) }
+        // v6: also each response's transcript file and tool ids, failed tool calls and compactions, for Waste.
+        return dir.appendingPathComponent("claude-usage-cache-v6.json")
     }()
     private var loadedDisk = false
     /// Saving rewrites the whole cache (about 50 MB of JSON for a month of heavy use), and some transcript grows
@@ -131,6 +143,9 @@ final class ClaudeUsageScanner {
         var apiMillis: [String: Int]
         var format = FormatReport()
         var resets: [LimitReset] = []
+        /// Tool calls that failed, and compactions by transcript file, for Waste.
+        var failedTools: Set<String> = []
+        var compactions: [String: [Date]] = [:]
     }
 
     /// Called with the number of files parsed so far during a scan that has real work to do.
@@ -326,6 +341,8 @@ final class ClaudeUsageScanner {
         var titles: [String: String] = [:]
         var hits: [Date] = []
         var resets: [LimitReset] = []
+        var failed: Set<String> = []
+        var compactions: [String: [Date]] = [:]
         var api: [String: Int] = [:]
         for r in results {
             for var c in r.calls {
@@ -338,10 +355,13 @@ final class ClaudeUsageScanner {
             titles.merge(r.titles) { a, _ in a }
             hits += r.limitHits
             resets += (r.resets ?? []).map { var x = $0; x.org = r.org; return x }
+            failed.formUnion(r.failedTools ?? [])
+            if let t = r.calls.first?.thread, let cs = r.compactions, !cs.isEmpty { compactions[t, default: []] += cs }
             api.merge(r.apiMillis) { max($0, $1) }
         }
         return Result(calls: best.values.filter { $0.time >= since }.sorted { $0.time < $1.time },
-                      titles: titles, limitHits: hits.sorted(), apiMillis: api, resets: resets.sorted { $0.seen < $1.seen })
+                      titles: titles, limitHits: hits.sorted(), apiMillis: api, resets: resets.sorted { $0.seen < $1.seen },
+                      failedTools: failed, compactions: compactions)
     }
 
     private static let isoFrac: ISO8601DateFormatter = {
@@ -377,6 +397,8 @@ final class ClaudeUsageScanner {
         out.titles = old.titles.merging(new.titles) { _, b in b }
         out.limitHits = old.limitHits + new.limitHits
         out.resets = (old.resets ?? []) + (new.resets ?? [])
+        out.failedTools = (old.failedTools ?? []) + (new.failedTools ?? [])
+        out.compactions = (old.compactions ?? []) + (new.compactions ?? [])
         out.apiMillis = old.apiMillis.merging(new.apiMillis) { max($0, $1) }
         return out
     }
@@ -396,6 +418,9 @@ final class ClaudeUsageScanner {
         let mAssistant = Data("\"type\":\"assistant\"".utf8)
         let mTitle = Data("-title\"".utf8)
         let mCost = Data("\"type\":\"cost-state\"".utf8)
+        let mToolError = Data("\"is_error\":true".utf8)
+        let mCompact = Data("compact_boundary".utf8), mCompactSummary = Data("\"isCompactSummary\":true".utf8)
+        let thread = url.lastPathComponent
         var bestById: [String: Call] = [:]
         var health = FormatHealth()
         func problem(_ p: FormatProblem) { health.problems[p.rawValue, default: 0] += 1 }
@@ -404,6 +429,24 @@ final class ClaudeUsageScanner {
             let isAssistant = line.range(of: mAssistant) != nil
             let isTitle = !isAssistant && line.range(of: mTitle) != nil
             let isCost = !isAssistant && line.range(of: mCost) != nil
+            // Failed tool calls and compactions, for Waste: only ids and times are kept, never what was said.
+            if !isAssistant, line.range(of: mToolError) != nil || line.range(of: mCompact) != nil || line.range(of: mCompactSummary) != nil {
+                if let obj = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any] {
+                    if line.range(of: mCompact) != nil || line.range(of: mCompactSummary) != nil,
+                       let t = (obj["timestamp"] as? String).flatMap({ isoFrac.date(from: $0) }) {
+                        out.compactions = (out.compactions ?? []) + [t]
+                    }
+                    for block in (obj["message"] as? [String: Any])?["content"] as? [[String: Any]] ?? []
+                    where (block["type"] as? String) == "tool_result" && (block["is_error"] as? Bool) == true {
+                        // Declining a tool isn't the tool failing.
+                        let text = (block["content"] as? String) ?? ""
+                        if !text.contains("doesn't want to proceed"), let id = block["tool_use_id"] as? String {
+                            out.failedTools = (out.failedTools ?? []) + [id]
+                        }
+                    }
+                }
+                continue
+            }
             guard isAssistant || isTitle || isCost else { continue }
             guard let obj = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any] else {
                 if isAssistant { health.checked += 1; problem(.unreadableRow) }
@@ -479,10 +522,12 @@ final class ClaudeUsageScanner {
             }
             var tools = 0, web = (u["server_tool_use"] as? [String: Any]).map { i($0, "web_search_requests") } ?? 0
             var servers: [String: Int] = [:]
+            var uses: [Call.ToolUse] = []
             for block in msg["content"] as? [[String: Any]] ?? [] {
                 guard let type = block["type"] as? String else { continue }
                 if type == "tool_use", let name = block["name"] as? String {
                     tools += 1
+                    if let tid = block["id"] as? String { uses.append(.init(id: tid, name: name)) }
                     if name.hasPrefix("mcp__") {
                         let server = name.dropFirst(5).components(separatedBy: "__").first ?? "mcp"
                         servers[server, default: 0] += 1
@@ -494,7 +539,7 @@ final class ClaudeUsageScanner {
                             sidechain: (obj["isSidechain"] as? Bool) ?? false, input: input, cw5: cw5, cw1h: cw1h,
                             cacheRead: cr, output: output, advisorTokens: advisorTokens, tools: tools, mcpServers: servers,
                             webSearches: web, mcpAttribution: obj["attributionMcpServer"] as? String, cost: cost,
-                            autoStart: isKickFile)
+                            autoStart: isKickFile, thread: thread, toolUses: uses.isEmpty ? nil : uses)
             if let b = bestById[id] {
                 // Same response streamed over several rows: tools accumulate, usage takes the final row.
                 var n = call.output >= b.output ? call : b
@@ -502,6 +547,8 @@ final class ClaudeUsageScanner {
                 n.mcpServers = b.mcpServers.merging(call.mcpServers, uniquingKeysWith: +)
                 n.webSearches = max(b.webSearches, call.webSearches)
                 n.time = min(b.time, call.time)
+                let allUses = (b.toolUses ?? []) + (call.toolUses ?? []).filter { u in !(b.toolUses ?? []).contains(u) }
+                n.toolUses = allUses.isEmpty ? nil : allUses
                 bestById[id] = n
             } else {
                 bestById[id] = call

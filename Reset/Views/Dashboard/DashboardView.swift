@@ -32,6 +32,7 @@ struct DashboardView: View {
                             valueCard.frame(width: 360)
                         }
                         windowsCard
+                        wasteCard
                         HStack(alignment: .top, spacing: 16) {
                             mixCard
                             heatCard
@@ -391,6 +392,82 @@ struct DashboardView: View {
     }
 
     // MARK: Mix and heatmap
+
+    // MARK: Where your window went
+
+    /// Usage that re-did work it didn't need to (see Waste). Subscription plans see a share of their usage, since
+    /// dollars aren't what they pay; with no plan price set, dollars lead.
+    private var wasteCard: some View {
+        let r = usage.waste
+        let onPlan = usage.totalPlanMonthly > 0
+        let share = Int((r.share * 100).rounded())
+        let colors: [Waste.Kind: Color] = [.breaks: Dash.claude, .busts: Dash.violet, .loops: Color(hex: 0xFF5C3A), .overkill: Dash.dim]
+        return GlowCard(glow: Dash.claude, glowAt: UnitPoint(x: 0, y: 1), glowSize: 260, glowOpacity: 0.25) {
+            VStack(alignment: .leading, spacing: 14) {
+                HStack(alignment: .firstTextBaseline) {
+                    CardHeader(title: "Where your window went", subtitle: "Usage that re-did work it didn't have to, \(rangePhrase)")
+                    Spacer()
+                    VStack(alignment: .trailing, spacing: 2) {
+                        Text(onPlan ? "\(share)% of your usage" : Dash.money(r.total)).font(Dash.num(28, .light)).foregroundStyle(.white)
+                        Text(onPlan ? "\(Dash.money(r.total)) at API prices, at most" : "\(share)% of spend, at most").font(Dash.label).foregroundStyle(Dash.dim)
+                    }
+                    .help("Breaks assume you'd have carried on in the same session; some of that re-reading couldn't have been avoided, so this is an upper bound.")
+                }
+                if r.spend == 0 {
+                    Text(usage.loading ? "Reading your sessions…" : "Nothing in this range yet").font(.system(size: 13)).foregroundStyle(Dash.dim)
+                }
+                ForEach(Waste.Kind.allCases, id: \.self) { k in
+                    wasteRow(r.bucket(k), color: colors[k] ?? Dash.dim, of: max(r.spend, 0.01), estimate: k == .overkill)
+                }
+                // The one habit that matters most, on its own line.
+                Label("After a long break, start fresh, don't resume.", systemImage: "arrow.counterclockwise")
+                    .font(.system(size: 13, weight: .medium)).foregroundStyle(Dash.claude)
+            }
+        }
+    }
+
+    private func wasteRow(_ b: Waste.Bucket, color: Color, of spend: Double, estimate: Bool) -> some View {
+        let byID = Dictionary(usage.sessions.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 10) {
+                Circle().fill(color).frame(width: 8, height: 8)
+                Text(b.kind.title).font(.system(size: 13)).foregroundStyle(estimate ? Dash.dim : .white)
+                if estimate { Text("estimate · not in the total").font(.system(size: 10)).foregroundStyle(Dash.faint) }
+                if b.kind == .busts, b.modelSwitches > 0 {
+                    Text("\(b.modelSwitches) from switching models").font(.system(size: 10)).foregroundStyle(Dash.faint)
+                }
+                Spacer()
+                Text("\(b.count)×").font(Dash.num(12)).foregroundStyle(Dash.dim).frame(width: 50, alignment: .trailing)
+                Text(String(format: "%.0f%%", b.usd / spend * 100)).font(Dash.num(12)).foregroundStyle(Dash.dim).frame(width: 44, alignment: .trailing)
+                Text(Dash.money(b.usd)).font(Dash.num(13)).foregroundStyle(estimate ? Dash.dim : .white).frame(width: 80, alignment: .trailing)
+            }
+            GeometryReader { g in
+                Capsule().fill(color.opacity(estimate ? 0.35 : 0.85)).frame(width: max(2, g.size.width * min(1, b.usd / spend)))
+            }
+            .frame(height: 4)
+            Text(b.kind.tip).font(.system(size: 11)).foregroundStyle(Dash.faint).fixedSize(horizontal: false, vertical: true)
+            // The sessions it came from most; right-click for the folder or the command that resumes one.
+            if !b.top.isEmpty, b.usd >= 1 {
+                HStack(spacing: 8) {
+                    ForEach(b.top, id: \.session) { t in
+                        let s = byID[t.session]
+                        Text("\(s?.title ?? String(t.session.prefix(8))) · \(Dash.money(t.usd))")
+                            .font(.system(size: 11)).foregroundStyle(Dash.dim).lineLimit(1)
+                            .padding(.horizontal, 8).padding(.vertical, 3)
+                            .background(Capsule().fill(Color.white.opacity(0.05)))
+                            .help(s?.title ?? t.session)
+                            .contextMenu {
+                                if let s {
+                                    Button("Copy command to resume it") { copyToClipboard(Self.resumeCommand(project: s.project, session: s.id)) }
+                                    folderActions(s.project)
+                                }
+                            }
+                    }
+                }
+            }
+        }
+        .padding(.vertical, 4)
+    }
 
     private var mixCard: some View {
         let mix = usage.tokenMix

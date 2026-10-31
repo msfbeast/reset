@@ -153,11 +153,24 @@ final class MCPServerTests: XCTestCase {
         XCTAssertEqual((result?["serverInfo"] as? [String: Any])?["name"] as? String, "reset")
     }
 
-    func testToolsListHasTheThreeTools() {
+    func testToolsListHasEveryTool() {
         let r = send(["jsonrpc": "2.0", "id": "a", "method": "tools/list"])
         XCTAssertEqual(r?["id"] as? String, "a", "string ids come back unchanged")
         let names = ((r?["result"] as? [String: Any])?["tools"] as? [[String: Any]])?.compactMap { $0["name"] as? String }
-        XCTAssertEqual(names, ["get_claude_usage", "set_budget", "clear_budget"])
+        XCTAssertEqual(names, ["get_claude_usage", "set_budget", "clear_budget", "get_waste_report"])
+    }
+
+    func testWasteReportGivesAgentsTheBucketsAndTips() {
+        var s = snap(used: 20)
+        s.waste = .init(days: 30, spendUSD: 100, totalUSD: 20, share: 0.2,
+                        buckets: [.init(kind: "breaks", title: "Coming back after a break", usd: 18, count: 4, tip: "Start fresh", inTotal: true)])
+        snapshot = s
+        let (report, isError) = call("get_waste_report")
+        XCTAssertFalse(isError)
+        XCTAssertEqual(report["avoidable_share_of_usage"] as? Double, 0.2)
+        XCTAssertEqual((report["buckets"] as? [[String: Any]])?.first?["tip"] as? String, "Start fresh")
+        snapshot = snap(used: 20)
+        XCTAssertNotNil(call("get_waste_report").0["error"], "nothing worked out yet says so")
     }
 
     func testUsageWithoutSnapshotIsAnError() {

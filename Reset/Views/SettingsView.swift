@@ -254,6 +254,15 @@ struct SettingsView: View {
             }
 
             Section {
+                Toggle("Warn before a big session's cache expires", isOn: $store.breakGuardEnabled)
+            } header: {
+                Text("Break Guard")
+            } footer: {
+                Text("Coming back to a long session after its cache has expired re-reads all of it at full price, and by then even /compact pays for that. When a big session has been idle 10 minutes, the menu says how long it stays warm, the menu bar counts down the last 15 minutes, and 10 minutes before it expires you get a heads-up (on your phone too, if phone alerts are on).")
+                    .foregroundStyle(.secondary)
+            }
+
+            Section {
                 Picker("Keep this Mac awake", selection: Binding(get: { store.keepAwake.mode }, set: { store.keepAwake.mode = $0 })) {
                     ForEach(KeepAwake.Mode.allCases) { Text($0.label).tag($0) }
                 }

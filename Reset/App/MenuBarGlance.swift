@@ -30,6 +30,8 @@ struct MenuBarGlance: Equatable {
     var text: String
     /// The weekly limit, drawn under `text` when both limits are shown.
     var detail: String? = nil
+    /// Minutes until a big session's cache expires (see BreakGuard), drawn after the text with an hourglass.
+    var cacheMinutes: Int? = nil
     /// Claude Code is signed out, so live usage is paused; a small warning sign goes in front.
     var warning = false
     /// What VoiceOver says. The pill is an image, so without this it would be silent; spelled out in words,
@@ -193,10 +195,23 @@ enum MenuBarPill {
             NSAttributedString(string: text, attributes: [.font: NSFont.monospacedDigitSystemFont(ofSize: size, weight: weight),
                                                           .foregroundColor: ink.withAlphaComponent(alpha)])
         }
-        let lines: [NSAttributedString] = twoLines
+        var lines: [NSAttributedString] = twoLines
             // Softer than the session line, except on red, where white needs all the contrast it has.
             ? [attributed(g.text, size: 9, weight: .bold), attributed(g.detail ?? "", size: 9, weight: .semibold, alpha: inkColor == .white ? 1 : 0.75)]
             : [attributed(g.text, size: 12, weight: .semibold)]
+        // A big session's cache about to expire: "· ⏳ 14m" after the first line.
+        if let m = g.cacheMinutes, let first = lines.first,
+           let glass = NSImage(systemSymbolName: "hourglass", accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: twoLines ? 8 : 10, weight: .bold)) {
+            let tinted = NSImage(size: glass.size, flipped: false) { r in glass.draw(in: r); ink.set(); r.fill(using: .sourceAtop); return true }
+            let attachment = NSTextAttachment(); attachment.image = tinted
+            attachment.bounds = NSRect(x: 0, y: twoLines ? -1 : -1.5, width: glass.size.width, height: glass.size.height)
+            let line = NSMutableAttributedString(attributedString: first)
+            line.append(attributed(" · ", size: twoLines ? 9 : 12, weight: .semibold, alpha: 0.7))
+            line.append(NSAttributedString(attachment: attachment))
+            line.append(attributed(" \(m)m", size: twoLines ? 9 : 12, weight: .semibold))
+            lines[0] = line
+        }
         let textWidth = lines.map { ceil($0.size().width) }.max() ?? 0
         // Tinted over its own shape, so the "!" stays cut out; a palette colour filled the whole triangle.
         let icon: NSImage? = g.warning

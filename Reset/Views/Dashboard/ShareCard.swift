@@ -61,11 +61,69 @@ struct ShareCardView: View {
     }
 }
 
+/// The "where it went" card: how much of the period re-did work it didn't have to, and what caused it.
+struct WasteCardView: View {
+    struct Model {
+        var title: String
+        var hero: String
+        var line: String
+        var cause: String
+        var segments: [(name: String, usd: Double, color: Color)]
+    }
+    let m: Model
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            Color(hex: 0x050505)
+            RadialGradient(colors: [Color(hex: 0xFF7A1F).opacity(0.5), .clear], center: UnitPoint(x: 0.2, y: 0.7), startRadius: 0, endRadius: 560)
+            VStack(alignment: .leading, spacing: 0) {
+                HStack {
+                    Text(m.title).font(.system(size: 26)).foregroundStyle(Color.white.opacity(0.72))
+                    Spacer()
+                    Text("reset").font(.system(size: 26, weight: .semibold, design: .rounded)).foregroundStyle(.white)
+                }
+                Spacer().frame(height: 40)
+                Text(m.hero).font(.system(size: 210, weight: .light).monospacedDigit()).foregroundStyle(.white)
+                    .minimumScaleFactor(0.5).lineLimit(1).frame(height: 210)
+                Text(m.line).font(.system(size: 36)).foregroundStyle(.white).padding(.top, 8)
+                Text(m.cause).font(.system(size: 26)).foregroundStyle(Color.white.opacity(0.6)).padding(.top, 6)
+                Spacer()
+                let total = max(0.01, m.segments.reduce(0) { $0 + $1.usd })
+                GeometryReader { g in
+                    HStack(spacing: 4) {
+                        ForEach(m.segments.indices, id: \.self) { i in
+                            RoundedRectangle(cornerRadius: 6).fill(m.segments[i].color)
+                                .frame(width: max(6, (g.size.width - 8) * m.segments[i].usd / total))
+                        }
+                    }
+                }
+                .frame(height: 22)
+                HStack(spacing: 28) {
+                    ForEach(m.segments.indices, id: \.self) { i in
+                        HStack(spacing: 8) {
+                            Circle().fill(m.segments[i].color).frame(width: 12, height: 12)
+                            Text(m.segments[i].name).font(.system(size: 19)).foregroundStyle(Color.white.opacity(0.7))
+                        }
+                    }
+                    Spacer()
+                    Text("found by Reset · msfbeast.github.io/reset").font(.system(size: 19)).foregroundStyle(Color.white.opacity(0.5))
+                }
+                .padding(.top, 14)
+            }
+            .padding(.horizontal, 64).padding(.vertical, 56)
+        }
+        .frame(width: 1200, height: 675)
+        .environment(\.colorScheme, .dark)
+    }
+}
+
 /// Builds the card from current usage, previews it, and copies, saves or shares the PNG.
 struct ShareSheet: View {
     @Bindable var usage: UsageStore
     @Environment(\.dismiss) private var dismiss
     @State private var showMascot = true
+    /// Which card: the value of the period, or where its usage went.
+    @State private var showWaste = false
     @State private var copied = false
 
     private var model: ShareCardView.Model { Self.model(usage, mascot: showMascot) }
@@ -104,7 +162,34 @@ struct ShareSheet: View {
                      mascot: showMascot ? MascotArt.image("claude", .fresh) : nil)
     }
 
-    @MainActor private func render() -> NSImage? { Self.render(model) }
+    @MainActor private func render() -> NSImage? {
+        guard showWaste else { return Self.render(model) }
+        let r = ImageRenderer(content: WasteCardView(m: Self.wasteModel(usage)))
+        r.scale = 2
+        return r.nsImage
+    }
+
+    /// A share of usage on a subscription (dollars aren't what was paid), dollars at API rates otherwise.
+    static func wasteModel(_ usage: UsageStore) -> WasteCardView.Model {
+        let r = usage.waste
+        // A plan price set means a subscription: a share of usage, not dollars that weren't paid.
+        let onPlan = usage.totalPlanMonthly > 0
+        let period: String = {
+            switch usage.range {
+            case .today: return "today"
+            case .week: return "this week"
+            case .month: return "in the last 30 days"
+            case .all: return usage.firstCall.map { "since \($0.formatted(.dateTime.month(.wide).day()))" } ?? "so far"
+            }
+        }()
+        let breaks = r.bucket(.breaks).usd
+        return .init(title: "My Claude Code, \(period)",
+                     hero: onPlan ? "\(Int((r.share * 100).rounded()))%" : "$" + Int(r.total.rounded()).formatted(),
+                     line: onPlan ? "of my usage re-did work it didn't need to" : "spent re-doing work it didn't need to",
+                     cause: breaks >= r.total / 2 ? "Mostly re-reading long sessions after a break" : "Context rebuilt mid-session, and tools failing in a row",
+                     segments: [("Breaks", breaks, Color(hex: 0xFF8A2A)), ("Busts", r.bucket(.busts).usd, Color(hex: 0x9B7BFF)),
+                                ("Loops", r.bucket(.loops).usd, Color(hex: 0xFF5C3A))])
+    }
 
     @MainActor static func render(_ m: ShareCardView.Model) -> NSImage? {
         let r = ImageRenderer(content: ShareCardView(m: m))
@@ -122,12 +207,19 @@ struct ShareSheet: View {
                 }
                 .pickerStyle(.segmented).frame(width: 300)
             }
-            ShareCardView(m: model)
+            Group {
+                if showWaste { WasteCardView(m: Self.wasteModel(usage)) } else { ShareCardView(m: model) }
+            }
                 .scaleEffect(0.6, anchor: .topLeading)
                 .frame(width: 720, height: 405, alignment: .topLeading)
                 .clipShape(RoundedRectangle(cornerRadius: 14))
             HStack {
-                Toggle("Mascot", isOn: $showMascot)
+                Picker("", selection: $showWaste) {
+                    Text("Value").tag(false)
+                    Text("Where it went").tag(true)
+                }
+                .pickerStyle(.segmented).frame(width: 220)
+                if !showWaste { Toggle("Mascot", isOn: $showMascot) }
                 Spacer()
                 Button(copied ? "Copied" : "Copy image") {
                     guard let img = render() else { return }
@@ -150,6 +242,7 @@ struct ShareSheet: View {
         .padding(18)
         .frame(width: 756)
         .onChange(of: showMascot) { _, _ in copied = false }
+        .onChange(of: showWaste) { _, _ in copied = false }
         .onChange(of: usage.range) { _, _ in copied = false }
     }
 }

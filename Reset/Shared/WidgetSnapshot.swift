@@ -64,6 +64,18 @@ struct WidgetSnapshot: Codable {
     var limitDays: [Int]?
     /// Projected time the Claude window runs out before its reset, when the pace says so.
     var claudeRunsOutAt: Date?
+    /// Where the last 30 days' usage went (see Waste), for the MCP server's get_waste_report.
+    var waste: WasteSummary?
+
+    struct WasteSummary: Codable, Equatable {
+        struct Bucket: Codable, Equatable { var kind: String; var title: String; var usd: Double; var count: Int; var tip: String; var inTotal: Bool }
+        var days: Int
+        var spendUSD: Double
+        var totalUSD: Double
+        var share: Double
+        var buckets: [Bucket]
+    }
+
     /// When a widget's "Start now" was pressed and the app began starting Claude's window; cleared when done.
     var startingAt: Date?
     /// Every Claude account, the main one first, whether or not it's shown in the menu: reset-mcp answers for the

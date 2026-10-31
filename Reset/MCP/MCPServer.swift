@@ -41,7 +41,7 @@ enum MCPServer {
         case "initialize":
             let requested = params?["protocolVersion"] as? String ?? "2025-06-18"
             return result(["protocolVersion": requested, "capabilities": ["tools": [String: Any]()],
-                           "serverInfo": ["name": "reset", "version": "0.3.26"]])
+                           "serverInfo": ["name": "reset", "version": "0.3.27"]])
         case "tools/list":
             return result(["tools": tools])
         case "tools/call":
@@ -53,6 +53,8 @@ enum MCPServer {
                                                   org: env.org())))
             case "set_budget":
                 return result(content(setBudget(args, env: env)))
+            case "get_waste_report":
+                return result(content(wasteReport(env.snapshot(), running: env.running())))
             case "clear_budget":
                 let had = Budget.load(from: env.budgetURL)
                 Budget.clear(at: env.budgetURL)
@@ -102,7 +104,25 @@ enum MCPServer {
             "description": "Remove the active pacing budget, for example when the task is done.",
             "inputSchema": ["type": "object", "properties": [String: Any](), "additionalProperties": false],
         ],
+        [
+            "name": "get_waste_report",
+            "description": "Where the last 30 days of Claude Code usage went: how much re-did work it didn't need to (re-reading long sessions after the cache expired, context rebuilt mid-session, the same tool failing in a row), with a tip for each. Use it to change habits, e.g. suggest starting fresh after a long break or compacting before one.",
+            "inputSchema": ["type": "object", "properties": [String: Any](), "additionalProperties": false],
+        ],
     ]
+
+    static func wasteReport(_ snap: WidgetSnapshot?, running: Bool) -> [String: Any] {
+        guard let w = snap?.waste else { return ["error": "Reset isn't running or hasn't worked this out yet. Open Reset.app."] }
+        var out: [String: Any] = [
+            "period_days": w.days, "spend_usd": w.spendUSD, "avoidable_usd": w.totalUSD,
+            "avoidable_share_of_usage": w.share,
+            "note": "API list-price value. The break figure is an upper bound: it assumes the session would have carried on.",
+            "buckets": w.buckets.map { ["kind": $0.kind, "title": $0.title, "usd": $0.usd, "count": $0.count, "tip": $0.tip,
+                                        "counted_in_total": $0.inTotal] as [String: Any] },
+        ]
+        if !running { out["stale"] = true }
+        return out
+    }
 
     private static func setBudget(_ args: [String: Any], env: Environment) -> [String: Any] {
         let (made, problem) = Budget.from(arguments: args, now: env.now())

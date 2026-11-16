@@ -2,6 +2,10 @@
 
 The latest release is on the [Releases page](https://github.com/msfbeast/reset/releases/latest). Older builds are kept but not listed; this file is the history.
 
+## 0.3.28 — memory, properly
+
+- Closing the dashboard (or Settings) now releases it. A closed window used to keep its content and redraw it every second, so once the dashboard had been opened Reset stayed around 440 MB and 6% CPU. Now it drops back to about 70–140 MB and 2–3% within seconds of closing, and reloads when you open it again. The dashboard still uses more memory while it's open.
+
 ## 0.3.27 — where your window went
 
 - A dashboard card showing how much of your usage re-did work it didn't need to (breaks, busts, loops), each with a tip and the sessions it came from, plus a "where it went" share card and a `get_waste_report` MCP tool.

@@ -8,6 +8,7 @@ struct ResetApp: App {
 
     var body: some Scene {
         MenuBarExtra {
+            // Not wrapped in WhileVisible: the menu is small, and it's the one window that must never come up empty.
             MenuView(store: store)
         } label: {
             MenuBarLabel(store: store)
@@ -15,7 +16,7 @@ struct ResetApp: App {
         .menuBarExtraStyle(.window)
 
         Window("Reset", id: "dashboard") {
-            DashboardView(store: store, usage: store.usage)
+            WhileVisible { DashboardView(store: store, usage: store.usage) }
         }
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 1240, height: 900)
@@ -27,7 +28,7 @@ struct ResetApp: App {
         .windowResizability(.contentSize)
 
         Window("Reset Settings", id: "settings") {
-            SettingsView(store: store)
+            WhileVisible { SettingsView(store: store) }
         }
         .windowResizability(.contentSize)
     }
@@ -69,6 +70,21 @@ struct MenuBarLabel: View {
                     d.set(true, forKey: "dashboardSeen")
                     NSApp.activate(ignoringOtherApps: true)
                     openWindow(id: "dashboard")
+                    // Test hook: `-cycleWindows /path.json` closes the dashboard, reopens it and closes it again, writing whether each window's content is loaded after every step (see WhileVisible).
+                    if let path = d.string(forKey: "cycleWindows") {
+                        var steps: [[String: Any]] = []
+                        func record(_ step: String) {
+                            let windows = NSApp.windows.map { ["title": $0.title, "open": $0.isVisible, "seen": $0.occlusionState.contains(.visible),
+                                                               "class": String(describing: type(of: $0)), "size": "\(Int($0.frame.width))x\(Int($0.frame.height))"] as [String: Any] }
+                            steps.append(["step": step, "loaded": WindowVisibilityView.loaded, "windows": windows])
+                            try? JSONSerialization.data(withJSONObject: steps, options: .prettyPrinted).write(to: URL(fileURLWithPath: path))
+                        }
+                        func at(_ t: Double, _ work: @escaping () -> Void) { DispatchQueue.main.asyncAfter(deadline: .now() + t, execute: work) }
+                        at(18) { record("dashboard open"); NSApp.windows.first { $0.title == "Reset" }?.close() }
+                        at(38) { record("dashboard closed 20s"); NSApp.activate(ignoringOtherApps: true); openWindow(id: "dashboard") }
+                        at(48) { record("dashboard reopened 10s"); NSApp.windows.first { $0.title == "Reset" }?.close() }
+                        at(66) { record("dashboard closed again 18s") }
+                    }
                 }
             }
     }
